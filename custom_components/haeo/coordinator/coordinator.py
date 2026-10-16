@@ -30,7 +30,21 @@ from custom_components.haeo.const import (
     NetworkOutputName,
 )
 from custom_components.haeo.core.adapters.registry import ELEMENT_TYPES
-from custom_components.haeo.core.const import CONF_DEBOUNCE_SECONDS, CONF_ELEMENT_TYPE, DEFAULT_DEBOUNCE_SECONDS
+from custom_components.haeo.core.adapters.reserve import (
+    ReservePlanner,
+    ReservePlanningError,
+    ReservePolicy,
+    ReserveResult,
+)
+from custom_components.haeo.core.const import (
+    CONF_DEBOUNCE_SECONDS,
+    CONF_ELEMENT_TYPE,
+    CONF_RESERVE_ENABLED,
+    CONF_RESERVE_EXPORT_PRICE,
+    DEFAULT_DEBOUNCE_SECONDS,
+    DEFAULT_RESERVE_EXPORT_PRICE,
+    HUB_SECTION_RESERVE_POLICY,
+)
 from custom_components.haeo.core.context import OptimizationContext
 from custom_components.haeo.core.data.loader.config_loader import load_element_config_from_values
 from custom_components.haeo.core.model import ModelOutputName, Network, OutputData, OutputType
@@ -324,6 +338,16 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._pending_refresh: bool = False
         self._optimization_in_progress: bool = False  # Prevent concurrent optimizations
         self._pending_element_updates: dict[str, ElementConfigData] = {}
+        self._input_revision = 0
+        self._unloaded = False
+        reserve_data = config_entry.data.get(HUB_SECTION_RESERVE_POLICY, {})
+        self._reserve_policy = (
+            ReservePolicy(
+                export_price=float(reserve_data.get(CONF_RESERVE_EXPORT_PRICE, DEFAULT_RESERVE_EXPORT_PRICE)),
+            )
+            if reserve_data.get(CONF_RESERVE_ENABLED, False)
+            else None
+        )
 
         # No update_interval - we're event-driven from input entities
         # No request_refresh_debouncer - we handle debouncing ourselves
@@ -533,8 +557,9 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
         Checks auto_optimize_enabled before proceeding. If disabled, does nothing.
         Handles debouncing to prevent excessive refreshes.
         """
+        self._input_revision += 1
         # Skip if auto-optimization is disabled
-        if not self.auto_optimize_enabled:
+        if self._unloaded or not self.auto_optimize_enabled:
             return
 
         # If optimization is in progress, just mark pending
@@ -676,6 +701,7 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     def cleanup(self) -> None:
         """Clean up coordinator resources when unloading."""
+        self._unloaded = True
         for unsub in self._state_change_unsubs:
             unsub()
         self._state_change_unsubs.clear()
@@ -721,6 +747,8 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # Set flag to prevent concurrent optimization triggers from callbacks
         # This is cleared in the finally block
         self._optimization_in_progress = True
+        self._pending_refresh = False
+        input_revision = self._input_revision
 
         try:
             # Mark optimization start time immediately to prevent concurrent triggers
@@ -764,8 +792,30 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
             # Apply any pending element updates before optimization
             self._apply_pending_element_updates()
 
-            # Perform the optimization
-            cost = await self.hass.async_add_executor_job(network.optimize)
+            # The optional reserve solver owns disposable models; the native
+            # warm-start LP remains intact for opt-out and existing updaters.
+            policy = self._reserve_policy
+            if policy is None:
+                cost = await self.hass.async_add_executor_job(network.optimize)
+            else:
+
+                def solve_reserve() -> ReserveResult:
+                    planner = ReservePlanner(loaded_configs, network.periods, policy)
+                    return planner.solve()
+
+                try:
+                    solved: ReserveResult = await self.hass.async_add_executor_job(solve_reserve)
+                except ReservePlanningError as err:
+                    raise UpdateFailed(
+                        translation_domain=DOMAIN,
+                        translation_key="reserve_policy_failed",
+                        translation_placeholders={"reason": str(err)},
+                    ) from err
+                if self._unloaded or input_revision != self._input_revision:
+                    raise UpdateFailed(translation_domain=DOMAIN, translation_key="reserve_inputs_changed")
+                network = solved.network
+                cost = solved.cost
+                _LOGGER.debug("Reserve objective gap %s", solved.objective_gap)
 
             end_time = time.time()
             optimization_duration = end_time - start_time
@@ -857,6 +907,8 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
             completed_at = dt_util.utc_from_timestamp(end_time).astimezone()
 
+            if self._reserve_policy is not None and (self._unloaded or input_revision != self._input_revision):
+                raise UpdateFailed(translation_domain=DOMAIN, translation_key="reserve_inputs_changed")
             return CoordinatorData(
                 context=context,
                 outputs=outputs,
@@ -866,8 +918,11 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
         finally:
             # Always clear the in-progress flag
             self._optimization_in_progress = False
-            # Clear pending flag - the next state change will trigger a new optimization
+            pending_refresh = self._pending_refresh
             self._pending_refresh = False
+            if self._reserve_policy is not None and pending_refresh and not self._unloaded:
+                self._last_optimization_time = time.time()
+                self.signal_optimization_stale()
 
 
 __all__ = [

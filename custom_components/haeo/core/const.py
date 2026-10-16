@@ -39,9 +39,18 @@ DEFAULT_TIER_4_DURATION: Final = 60
 
 DEFAULT_DEBOUNCE_SECONDS: Final = 2  # 2 seconds debounce window
 
+# Battery reserve policy configuration keys
+CONF_RESERVE_ENABLED: Final = "enabled"
+CONF_RESERVE_EXPORT_PRICE: Final = "export_price"
+
+# Battery reserve policy defaults and bounds
+DEFAULT_RESERVE_ENABLED: Final = False
+DEFAULT_RESERVE_EXPORT_PRICE: Final = 4.0  # $/kWh export price at or above which reserve becomes eligible for export
+
 # Hub section keys
 HUB_SECTION_COMMON: Final = "common"
 HUB_SECTION_ADVANCED: Final = "advanced"
+HUB_SECTION_RESERVE_POLICY: Final = "reserve_policy"
 HUB_SECTION_TIERS: Final = "tiers"
 
 # Horizon presets

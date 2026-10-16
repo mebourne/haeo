@@ -4,6 +4,10 @@ Shadow prices are dual values from the linear programming optimization.
 They quantify how much the total objective would improve if a constraint were relaxed by one unit.
 In HAEO, shadow prices help explain why the optimizer makes certain decisions and highlight where additional flexibility creates the most value.
 
+The opt-in [experimental reserve policy](../user-guide/reserve-policy.md) solves mixed-integer models, which do not provide valid LP duals.
+Its shadow-price and derived marginal-price outputs are unknown/unavailable, not zero.
+The same rule applies whenever the solver reports an invalid dual solution; ordinary native LP reporting is unchanged.
+
 ## What shadow prices tell you
 
 Every constraint in the optimization problem has an associated shadow price.

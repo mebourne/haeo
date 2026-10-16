@@ -48,6 +48,7 @@ from custom_components.haeo.core.const import (
     CONF_TIER_3_DURATION,
     CONF_TIER_4_COUNT,
     CONF_TIER_4_DURATION,
+    HUB_SECTION_RESERVE_POLICY,
 )
 from custom_components.haeo.flows import HUB_SECTION_ADVANCED, HUB_SECTION_COMMON, HUB_SECTION_TIERS
 from tools.live_hass import (
@@ -105,6 +106,7 @@ async def setup_haeo_entry(hass: HomeAssistant, scenario_config: dict[str, Any])
                 CONF_TIER_4_DURATION: tiers_data.get("tier_4_duration", 60),
             },
             HUB_SECTION_ADVANCED: {},
+            HUB_SECTION_RESERVE_POLICY: scenario_config.get(HUB_SECTION_RESERVE_POLICY, {}),
         },
         version=scenario_config.get("version", 1),
         minor_version=scenario_config.get("minor_version", MIGRATION_MINOR_VERSION),

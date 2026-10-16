@@ -75,6 +75,13 @@ class HighsStatus(IntEnum):
     kOk = 0
     kWarning = 1
 
+class HighsVarType(IntEnum):
+    kContinuous = 0
+    kInteger = 1
+    kSemiContinuous = 2
+    kSemiInteger = 3
+    kImplicitInteger = 4
+
 class ObjSense(IntEnum):
     kMinimize = 0
     kMaximize = 1
@@ -114,6 +121,10 @@ class HighsSolution:
     def value_valid(self) -> bool: ...
     @property
     def dual_valid(self) -> bool: ...
+
+class HighsInfo:
+    mip_node_count: int
+    mip_dual_bound: float
 
 class Highs:
     cbLogging: HighsCallback
@@ -191,6 +202,7 @@ class Highs:
     def getNumRow(self) -> int: ...
     def getObjectiveValue(self) -> float: ...
     def getSolution(self) -> HighsSolution: ...
+    def getInfo(self) -> HighsInfo: ...
     def allVariableValues(self) -> list[float]: ...
     def val(self, var: highs_var | highs_linear_expression) -> float: ...
     def vals(

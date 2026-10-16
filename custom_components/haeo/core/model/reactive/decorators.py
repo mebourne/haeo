@@ -136,7 +136,9 @@ class ReactiveConstraint[R](ReactiveMethod[R]):
         # Extract shadow prices from the constraint using the solver
         cons = state["constraint"]
         arr = np.asarray(cons, dtype=object)
-        values = tuple(obj._solver.constrDuals(arr).flat)  # noqa: SLF001 (tightly coupled reactive infrastructure requires solver access) # pyright: ignore[reportPrivateUsage]
+        solver = obj._solver  # noqa: SLF001 (reactive infrastructure owns solver access)
+        # Integer solutions have no valid LP duals; keep these outputs unknown.
+        values = tuple(solver.constrDuals(arr).flat) if solver.getSolution().dual_valid else ()
         return OutputData(
             type=OutputType.SHADOW_PRICE,
             unit=self.unit,

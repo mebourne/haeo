@@ -166,6 +166,7 @@ nav:
           - Node: user-guide/elements/node.md
           - Connections: user-guide/elements/connections.md
       - Understanding Results: user-guide/optimization.md
+      - Experimental reserve policy: user-guide/reserve-policy.md
       - Data Updates: user-guide/data-updates.md
       - Automation Examples: user-guide/automations.md
       - Troubleshooting: user-guide/troubleshooting.md
