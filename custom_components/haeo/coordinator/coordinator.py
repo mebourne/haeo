@@ -338,7 +338,6 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._pending_refresh: bool = False
         self._optimization_in_progress: bool = False  # Prevent concurrent optimizations
         self._pending_element_updates: dict[str, ElementConfigData] = {}
-        self._input_revision = 0
         self._unloaded = False
         reserve_data = config_entry.data.get(HUB_SECTION_RESERVE_POLICY, {})
         self._reserve_policy = (
@@ -536,7 +535,6 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
         Checks auto_optimize_enabled before proceeding. If disabled, does nothing.
         Handles debouncing to prevent excessive refreshes.
         """
-        self._input_revision += 1
         # Skip if auto-optimization is disabled
         if self._unloaded or not self.auto_optimize_enabled:
             return
@@ -727,7 +725,6 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # This is cleared in the finally block
         self._optimization_in_progress = True
         self._pending_refresh = False
-        input_revision = self._input_revision
 
         try:
             # Mark optimization start time immediately to prevent concurrent triggers
@@ -795,8 +792,6 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
                         translation_key="reserve_policy_failed",
                         translation_placeholders={"reason": str(err)},
                     ) from err
-                if self._unloaded or input_revision != self._input_revision:
-                    raise UpdateFailed(translation_domain=DOMAIN, translation_key="reserve_inputs_changed")
                 network = solved.network
                 cost = solved.cost
                 _LOGGER.debug("Reserve objective gap %s", solved.objective_gap)
@@ -891,8 +886,9 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
             completed_at = dt_util.utc_from_timestamp(end_time).astimezone()
 
-            if self._reserve_policy is not None and (self._unloaded or input_revision != self._input_revision):
-                raise UpdateFailed(translation_domain=DOMAIN, translation_key="reserve_inputs_changed")
+            if self._unloaded:
+                msg = "Integration unloaded during optimization"
+                raise UpdateFailed(msg)
             return CoordinatorData(
                 context=context,
                 outputs=outputs,
@@ -904,7 +900,9 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._optimization_in_progress = False
             pending_refresh = self._pending_refresh
             self._pending_refresh = False
-            if self._reserve_policy is not None and pending_refresh and not self._unloaded:
+            # Publish this solve's snapshot before replanning changes received
+            # during the solve; input changes are not optimization failures.
+            if pending_refresh and not self._unloaded:
                 self._last_optimization_time = time.time()
                 self.signal_optimization_stale()
 

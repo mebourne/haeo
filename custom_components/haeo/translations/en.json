@@ -580,9 +580,6 @@
     "no_history_at_time": {
       "message": "No history available at time {time} for: {missing}. The recorder may not have data this far back."
     },
-    "reserve_inputs_changed": {
-      "message": "Reserve inputs changed during optimization. The outdated result was discarded; a fresh optimization will run when the inputs are aligned."
-    },
     "reserve_policy_failed": {
       "message": "Reserve planning failed: {reason}. Check the reserve settings, or turn off Experimental battery reserve policy to restore standard optimization."
     },

@@ -4,6 +4,7 @@ import asyncio
 from datetime import timedelta
 import threading
 
+from freezegun import freeze_time
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 from homeassistant.util.json import JsonValueType
@@ -12,6 +13,7 @@ from pytest_homeassistant_custom_component.common import async_fire_time_changed
 
 from custom_components.haeo.core.adapters.reserve import ReservePlanner, ReserveResult
 from custom_components.haeo.core.const import HUB_SECTION_RESERVE_POLICY
+from custom_components.haeo.core.model import Network
 from custom_components.haeo.sensor_utils import get_output_sensors
 from tools.sim_hass import setup_haeo_entry
 
@@ -200,41 +202,78 @@ async def test_reserve_setup_reload_and_opt_out(hass: HomeAssistant) -> None:
     assert "forecast" not in outputs["sensor.market_export_power"]["attributes"]
 
 
-async def test_changed_inputs_discard_in_flight_result_and_retry(
-    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+@freeze_time("2026-10-16T00:00:00Z")
+@pytest.mark.parametrize("reserve_enabled", [False, True])
+async def test_changed_inputs_publish_snapshot_and_queue_refresh(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch, reserve_enabled: bool
 ) -> None:
-    """A canceled spike must not publish a stale sell plan or require another price update."""
+    """Retain outputs, publish a coherent starting snapshot, then replan queued input changes in either mode."""
     set_reserve_inputs(hass)
-    entry = await setup_haeo_entry(hass, reserve_hub_config())
+    config = reserve_hub_config()
+    config[HUB_SECTION_RESERVE_POLICY] = {"enabled": reserve_enabled}
+    entry = await setup_haeo_entry(hass, config)
     coordinator = entry.runtime_data.coordinator
-    solve_finished = asyncio.Event()
+    published_outputs = {
+        entity_id: output
+        for entity_id, output in get_output_sensors(hass, entry).items()
+        if entity_id.startswith("sensor.")
+    }
+    set_reserve_inputs(hass, soc=35, export=8)
+    await hass.async_block_till_done()
+    solve_started = asyncio.Event()
     release = threading.Event()
     solve = ReservePlanner.solve
+    optimize = Network.optimize
 
     def held_solve(planner: ReservePlanner) -> ReserveResult:
-        result = solve(planner)
-        hass.loop.call_soon_threadsafe(solve_finished.set)
+        hass.loop.call_soon_threadsafe(solve_started.set)
         assert release.wait(2)
-        return result
+        return solve(planner)
+
+    def held_optimize(network: Network) -> float:
+        hass.loop.call_soon_threadsafe(solve_started.set)
+        assert release.wait(2)
+        return optimize(network)
 
     monkeypatch.setattr(ReservePlanner, "solve", held_solve)
+    monkeypatch.setattr(Network, "optimize", held_optimize)
     refresh = hass.async_create_task(coordinator.async_refresh())
-    await asyncio.wait_for(solve_finished.wait(), 2)
-    inputs_changed = asyncio.Event()
-    unsubscribe = entry.runtime_data.input_stores[("Market", ("pricing", "price_target_source"))].add_listener(
-        inputs_changed.set
-    )
-    set_reserve_inputs(hass, export=0.15)
-    # Let the real input stores process their source-state events before returning
-    # the old result. The solver itself and output publication are not mocked.
-    await asyncio.wait_for(inputs_changed.wait(), 2)
-    unsubscribe()
-    release.set()
-    await refresh
+    try:
+        await asyncio.wait_for(solve_started.wait(), 2)
+        soc_changed, price_changed = asyncio.Event(), asyncio.Event()
+        unsubscribers = [
+            entry.runtime_data.input_stores[key].add_listener(event.set)
+            for key, event in (
+                (("Storage", ("storage", "initial_charge_percentage")), soc_changed),
+                (("Market", ("pricing", "price_target_source")), price_changed),
+            )
+        ]
+        set_reserve_inputs(hass, soc=20, export=0.15)
+        # Process real source events while the executor is held. The solver and
+        # output entities are real, and must not read these newer store values.
+        await asyncio.wait_for(asyncio.gather(soc_changed.wait(), price_changed.wait()), 2)
+        for unsubscribe in unsubscribers:
+            unsubscribe()
+        outputs = get_output_sensors(hass, entry)
+        assert {entity_id: outputs[entity_id] for entity_id in published_outputs} == published_outputs
+    finally:
+        release.set()
+        await refresh
     outputs = get_output_sensors(hass, entry)
-    assert outputs["sensor.market_export_power"]["state"] == "unavailable"
+    soc_forecast = outputs["sensor.storage_state_of_charge"]["attributes"].get("forecast")
+    assert isinstance(soc_forecast, list)
+    assert float(soc_forecast[0]["value"]) == 35
+    if reserve_enabled:
+        assert float(outputs["sensor.market_export_power"]["state"]) > 0
+    assert coordinator.data.context.source_states["sensor.observed_soc"].state == "35"
+    assert coordinator.data.context.source_states["sensor.export_tariff"].state == "8"
+
     monkeypatch.setattr(ReservePlanner, "solve", solve)
+    monkeypatch.setattr(Network, "optimize", optimize)
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=3))
     await hass.async_block_till_done(wait_background_tasks=True)
     outputs = get_output_sensors(hass, entry)
     assert float(outputs["sensor.market_export_power"]["state"]) == 0
+    soc_forecast = outputs["sensor.storage_state_of_charge"]["attributes"].get("forecast")
+    assert isinstance(soc_forecast, list)
+    assert float(soc_forecast[0]["value"]) == 20

@@ -126,9 +126,14 @@ Constraint shadow prices and load marginal-price summaries remain unknown/unavai
 They must not be interpreted as zero opportunity cost.
 Native-mode shadow prices are unchanged.
 
+Each solve uses the inputs, SOC, tariffs and horizon captured at its start.
+Previously published values and `forecast` attributes stay available while it runs.
+New input events do not change or invalidate that solve: its completed result replaces the published outputs, then one follow-up solve processes the latest pending inputs after the configured debounce.
+This applies with reserve enabled or disabled; intermediate input events are coalesced rather than replayed individually.
+Horizon period durations are updated before solving, never underneath a running solve, using the targeted upstream horizon fix backported onto v0.4.1.
+
 Invalid input or an infeasible model produces an optimization failure, not a native unprotected fallback.
-Inputs changed during an executor solve make the result stale; it is rejected and pending automatic updates are retried.
-On failure the current power forecast sensors become unavailable and their `forecast` attributes are dropped.
+On a real failure the current power forecast sensors become unavailable and their `forecast` attributes are dropped.
 Do not rely on cached attributes surviving a failure; templates and macros that read them can become unknown.
 
 **A forecast is not an actuator guard.**
