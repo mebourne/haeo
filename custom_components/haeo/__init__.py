@@ -34,6 +34,7 @@ from custom_components.haeo.flows import HUB_SECTION_ADVANCED
 from custom_components.haeo.flows.surfaced_policy import find_policy_subentry, get_policy_rules
 from custom_components.haeo.horizon import HorizonManager
 from custom_components.haeo.input_stores import InputStoreMap, build_input_stores
+from custom_components.haeo.migrations.release import repair_release_entry
 from custom_components.haeo.services import async_setup_services
 
 from . import migrations as _migrations
@@ -343,6 +344,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HaeoConfigEntry) -> bool
     """
     # Import here to avoid circular imports at module level
     from custom_components.haeo.entities.device import get_or_create_network_device  # noqa: PLC0415
+
+    repair_release_entry(hass, entry)
 
     # Ensure required subentries exist (auto-create if missing)
     await _ensure_required_subentries(hass, entry)
