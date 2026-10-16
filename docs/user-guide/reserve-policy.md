@@ -1,7 +1,7 @@
 # Experimental battery reserve policy
 
 This fork adds an **opt-in** reserve planner to the existing HAEO integration.
-The `patched` installation build `0.4.2.dev4` is based on upstream **v0.4.1** and intended for supervised use with external price/SOC limits, not unattended direct dispatch.
+The `patched` installation is based on upstream **v0.4.1** and intended for supervised use with external price/SOC limits, not unattended direct dispatch.
 It replaces the development-main-based dev3 build that encountered a config migration failure, as well as the rejected dev1/dev2 policies.
 HAEO still does not control any device.
 Your existing input entities, power/SOC forecasts and graphs remain the interface.
@@ -13,7 +13,7 @@ Your existing input entities, power/SOC forecasts and graphs remain the interfac
     Select the **`patched`** branch in the download/redownload dialog, not an inherited upstream release.
     `patched` is this fork's default branch; its HACS metadata downloads source rather than a nonexistent release ZIP.
     Replace the upstream HACS download with the fork; do not delete your configured HAEO integration or run two copies of the same domain.
-3. Restart Home Assistant and verify the integration reports version `0.4.2.dev4`.
+3. Restart Home Assistant and verify HAEO loads without setup errors.
 4. Open **Settings → Devices & services → HAEO → Configure** and expand **Experimental battery reserve policy**.
     Leave it disabled initially to confirm your existing inputs and forecasts still work.
 5. Check the battery settings below, enable the policy and submit.
@@ -21,12 +21,13 @@ Your existing input entities, power/SOC forecasts and graphs remain the interfac
 
 This build retains the release's nodes, custom tiers, input stores, adapters and output conventions.
 It does not run the unreleased version 1.4 migration.
-A separate repair runs before input loading to restore passive nodes and entity identities left by the failed dev3 migration, including after an unsuccessful release rollback.
-Known migrated horizon presets are restored; existing custom tiers are retained.
-See [release recovery](troubleshooting.md#returning-from-a-development-build-to-v041) for the repair's boundaries.
+The one-off development-migration repair is not included in the normal reserve build.
+If your configuration is still damaged by that migration, first recover using the separate [release-repair branch and instructions](https://github.com/mebourne/haeo/blob/release-repair/docs/user-guide/troubleshooting.md#returning-from-a-development-build-to-v041).
+After successful recovery, the saved configuration uses the release schema and does not need the repair on subsequent starts.
+Restoring an older damaged backup may require the repair again.
 Disabling the reserve policy returns to this build's native LP and preserves your stored battery costs.
-After successful repair, configuration uses the release schema again; the reserve option does not migrate it.
-Keep your pre-install backup: discarded custom settings cannot be reconstructed without one, and the repair has not inspected your live `.storage`.
+The reserve option does not migrate your configuration.
+Keep your pre-install backup: custom settings already discarded by the development migration cannot be reconstructed without one.
 
 For a manual install, download the `patched` source archive and replace only `custom_components/haeo` with that directory from the archive, then restart.
 The archive includes the built frontend card files; it does not require a frontend build on Home Assistant.

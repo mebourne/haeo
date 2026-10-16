@@ -2,27 +2,6 @@
 
 Common issues and their solutions.
 
-## Returning from a development build to v0.4.1
-
-The development version 1.4 migration changed passive nodes into junctions and
-changed horizon settings. An interrupted migration can leave those changes in
-place even though the entry still reports version 1.3. Reinstalling the unmodified
-release does not reverse them and can report `Switchboard is not a network participant`.
-
-The release-based repair restores passive nodes before loading inputs, retaining
-their original subentry IDs and existing entity IDs. It restores deleted node
-devices from Home Assistant's registry when available, and removes an exact
-passive duplicate created by an unsuccessful release setup. A completed migration's
-known horizon preset is converted back to release tiers; existing custom tiers
-are left unchanged. Custom tiers already discarded by the development migration
-cannot be recovered without a backup.
-
-Take a full backup before installing the repair. Do not delete the configured
-HAEO integration or edit `.storage`. After restarting, check optimization status,
-forecasts and device/entity customizations. The repair is independent of reserve
-planning and does not enable it. Restoring a pre-upgrade full backup remains the
-safest rollback when the saved configuration differs from these known cases.
-
 ## Forecasts Are Not Long Enough
 
 ### Problem
