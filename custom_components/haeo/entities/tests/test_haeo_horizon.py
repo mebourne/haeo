@@ -14,7 +14,7 @@ from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.util import dt as dt_util
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
 from custom_components.haeo.const import DOMAIN
 from custom_components.haeo.core.const import CONF_HORIZON_PRESET, CONF_NAME
@@ -548,3 +548,27 @@ async def test_horizon_manager_resume_restarts_timer(
 
     # Clean up
     manager.stop()
+
+
+async def test_horizon_manager_repeated_resume_can_be_stopped(
+    hass: HomeAssistant, config_entry: MockConfigEntry
+) -> None:
+    """Repeated resumes keep one boundary update and stop prevents any later horizon advance."""
+    with freeze_time("2026-10-16T10:00:00Z") as clock:
+        manager = HorizonManager(hass, config_entry)
+        updates: list[tuple[float, ...]] = []
+        manager.subscribe(lambda: updates.append(manager.get_forecast_timestamps()))
+        manager.start()
+        manager.resume()
+        manager.resume()
+        updates.clear()
+        clock.tick(timedelta(minutes=5))
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+        assert updates == [manager.get_forecast_timestamps()]
+        manager.stop()
+        stopped_timestamps = manager.get_forecast_timestamps()
+        clock.tick(timedelta(minutes=5))
+        async_fire_time_changed(hass, dt_util.utcnow())
+        await hass.async_block_till_done()
+        assert manager.get_forecast_timestamps() == stopped_timestamps

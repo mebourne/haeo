@@ -121,6 +121,7 @@ class HorizonManager:
 
     def _schedule_next_update(self) -> None:
         """Schedule the next horizon update at the next period boundary."""
+        self.pause()
         now = dt_util.utcnow()
         epoch_seconds = now.timestamp()
 
