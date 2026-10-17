@@ -48,6 +48,7 @@ class ConnectionElementConfig(TypedDict):
     target: str
     is_external: NotRequired[bool]
     is_time_sensitive: NotRequired[bool]
+    exclusive_with: NotRequired[str]
     segments: NotRequired[dict[str, SegmentSpec]]
     tags: NotRequired[set[int]]
 
@@ -70,6 +71,7 @@ class Connection[TOutputName: str](Element[TOutputName]):
         target: str,
         is_external: bool = False,
         is_time_sensitive: bool = False,
+        exclusive_with: str | None = None,
         segments: dict[str, SegmentSpec] | None = None,
         output_names: frozenset[TOutputName] | None = None,
         tags: set[int],
@@ -89,6 +91,7 @@ class Connection[TOutputName: str](Element[TOutputName]):
         self._target_element: Element[Any] | None = None
         self.is_external = is_external
         self.is_time_sensitive = is_time_sensitive
+        self.exclusive_with = exclusive_with
         self.priority = 0  # assigned by Network from sort_key
 
         self._segment_specs: OrderedDict[str, SegmentSpec] = OrderedDict(segments or {})

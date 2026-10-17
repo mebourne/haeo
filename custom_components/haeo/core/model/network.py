@@ -10,6 +10,7 @@ from highspy.highs import highs_cons, highs_linear_expression
 import numpy as np
 from numpy.typing import NDArray
 
+from .directions import DirectionSolver
 from .element import Element, NetworkElement
 from .elements import ELEMENTS, ModelElementConfig
 from .elements.battery import Battery, BatteryElementConfig
@@ -129,6 +130,7 @@ class Network:
         self.elements: dict[str, Element[Any]] = {}
         self.options: SolveOptions = options or CalibratedOptions()
         self._solver = Highs()
+        self._directions = DirectionSolver(self._solver)
         self._lex_constraint: highs_cons | None = None
         self._calibrated_weight: float | None = None
 
@@ -316,6 +318,7 @@ class Network:
                 msg = f"Failed to apply constraints for element '{element_name}'"
                 raise ValueError(msg) from e
 
+        self._directions.prepare({connection.name: connection for connection in connections})
         objectives = self.cost()
         if objectives is None:
             msg = "Network has no cost objectives — add connections with pricing segments"
@@ -341,6 +344,23 @@ class Network:
 
         return self._solve_lex(h, all_col_indices, cost_vectors, primary, secondary)
 
+    def minimize(self, objective: highs_linear_expression, *, absolute_tolerance: float = 0.0) -> tuple[float, float]:
+        """Minimize a custom objective with physical directions; return cost and gap.
+
+        Unlike optimize(), this does not add a secondary preference objective.
+        The tolerance is one absolute objective gap for the whole horizon.
+        """
+        for element in self.elements.values():
+            element.constraints()
+        self._directions.prepare(
+            {name: element for name, element in self.elements.items() if isinstance(element, Connection)}
+        )
+        self._solver.clearLinearObjectives()
+        self._relax_lex_constraint()
+        self._solver.setObjective(objective)
+        self._directions.run(absolute_tolerance=absolute_tolerance)
+        return _ensure_optimal(self._solver), self._directions.gap
+
     def _solve_lex(
         self,
         h: Highs,
@@ -355,13 +375,13 @@ class Network:
         # Phase 1: minimize primary
         _set_cost_vector(h, all_col_indices, cost_vectors[0])
         self._relax_lex_constraint()
-        h.run()
+        self._directions.run()
         primary_value = _ensure_optimal(h)
 
         # Phase 2: minimize secondary with primary constrained
         self._constrain_objective(primary, primary_value)
         _set_cost_vector(h, all_col_indices, cost_vectors[1])
-        h.run()
+        self._directions.run()
         secondary_value = _ensure_optimal(h)
 
         if isinstance(self.options, LexOptions):
@@ -369,7 +389,7 @@ class Network:
             epsilon = max(1e-6, abs(secondary_value) * 1e-6)
             self._constrain_objective(secondary, secondary_value + epsilon)
             _set_cost_vector(h, all_col_indices, cost_vectors[0])
-            h.run()
+            self._directions.run()
             _ensure_optimal(h)
 
         # Calibrate blend weight for future calls
@@ -396,7 +416,7 @@ class Network:
         self._relax_lex_constraint()
         blended = cost_vectors[0] + weight * cost_vectors[1]
         _set_cost_vector(h, all_col_indices, blended)
-        h.run()
+        self._directions.run()
         _ensure_optimal(h)
         return float(cost_vectors[0] @ np.asarray(h.allVariableValues()))
 
@@ -438,7 +458,7 @@ class Network:
             self._relax_lex_constraint()
             blended = cost_vectors[0] + w * cost_vectors[1]
             _set_cost_vector(h, all_col_indices, blended)
-            h.run()
+            self._directions.run()
             if h.getModelStatus() != HighsModelStatus.kOptimal:
                 return False
             bl_vals = np.asarray(h.allVariableValues())
@@ -483,7 +503,7 @@ class Network:
         self._relax_lex_constraint()
         blended = cost_vectors[0] + weight * cost_vectors[1]
         _set_cost_vector(h, all_col_indices, blended)
-        h.run()
+        self._directions.run()
         _ensure_optimal(h)
 
         return weight
@@ -500,6 +520,7 @@ class Network:
             self._lex_constraint = self._solver.addConstr(constraint_expr)
         else:
             self._update_constraint(self._lex_constraint, constraint_expr)
+        self._directions.objective_constraint = self._lex_constraint
 
     def _relax_lex_constraint(self) -> None:
         """Relax the lex constraint bounds so it is inactive."""

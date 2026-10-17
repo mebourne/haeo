@@ -4,6 +4,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.haeo.coordinator.network import (
     _MISSING,
@@ -12,9 +13,12 @@ from custom_components.haeo.coordinator.network import (
     _collect_policy_rules,
     _discover_setters,
     _extract_at_path,
+    create_network,
 )
+from custom_components.haeo.core.adapters.output_utils import expect_output_data
 from custom_components.haeo.core.const import CONF_ELEMENT_TYPE, CONF_NAME
 from custom_components.haeo.core.model import Network
+from custom_components.haeo.core.model.element import ELEMENT_POWER_BALANCE
 from custom_components.haeo.core.model.elements import (
     MODEL_ELEMENT_TYPE_CONNECTION,
     MODEL_ELEMENT_TYPE_NODE,
@@ -29,6 +33,7 @@ from custom_components.haeo.core.model.elements.policy_pricing import (
 )
 from custom_components.haeo.core.model.elements.segments import EfficiencySegment, PowerLimitSegment
 from custom_components.haeo.core.model.elements.segments.soc_pricing import SocPricingSegment
+from custom_components.haeo.core.model.network import BlendedOptions, CalibratedOptions, LexOptions, SolveOptions
 from custom_components.haeo.core.schema import as_connection_target
 from custom_components.haeo.core.schema.elements import ElementConfigData, ElementType
 from custom_components.haeo.core.schema.elements.connection import (
@@ -487,3 +492,162 @@ def test_collect_policy_rules_merges_multiple_policy_participants() -> None:
 
     rules = _collect_policy_rules(participants)
     assert len(rules) == 2
+
+
+@pytest.fixture
+def inverter_participants() -> dict[str, ElementConfigData]:
+    """Create fixed AC/DC demands, asymmetric losses and no battery or reserve."""
+    return {
+        "AC": {"element_type": ElementType.NODE, "name": "AC", "role": {}},
+        "Grid": {
+            "element_type": ElementType.GRID,
+            "name": "Grid",
+            "connection": as_connection_target("AC"),
+            "power_limits": {"max_power_source_target": 10.0, "max_power_target_source": 0.0},
+            "pricing": {"price_source_target": np.array([-0.1, -0.3, 0.15]), "price_target_source": 0.0},
+        },
+        "Inverter": {
+            "element_type": ElementType.INVERTER,
+            "name": "Inverter",
+            "connection": as_connection_target("AC"),
+            "power_limits": {"max_power_source_target": 10.0, "max_power_target_source": 10.0},
+            "efficiency": {"efficiency_source_target": 0.83, "efficiency_target_source": 0.91},
+        },
+        **{
+            name: {
+                "element_type": ElementType.LOAD,
+                "name": name,
+                "connection": as_connection_target(target),
+                "forecast": {"forecast": power},
+                "curtailment": {"curtailment": False},
+            }
+            for name, target, power in (("Load", "AC", 0.9), ("DC load", "Inverter", 1.0))
+        },
+    }
+
+
+@pytest.mark.parametrize("options", [LexOptions(), BlendedOptions(), CalibratedOptions()])
+@pytest.mark.parametrize("limit", [10.0, None])
+async def test_inverter_negative_price_does_not_create_demand(
+    hub_entry: MockConfigEntry,
+    inverter_participants: dict[str, ElementConfigData],
+    options: SolveOptions,
+    limit: float | None,
+) -> None:
+    """Native cold/warm solves serve fixed loads without profitable converter loops.
+
+    Cover all objective modes, optional nameplate limits, asymmetric losses and
+    variable durations. Energy and cost follow household demand, not invented
+    dissipation; there is no storage or reserve policy in this regression.
+    """
+    inverter = inverter_participants["Inverter"]
+    assert inverter["element_type"] == ElementType.INVERTER
+    inverter["power_limits"] = (
+        {} if limit is None else {"max_power_source_target": limit, "max_power_target_source": limit}
+    )
+    network, _ = await create_network(hub_entry, periods_seconds=[900, 3600, 1800], participants=inverter_participants)
+    network.options = options
+    for _ in range(2):
+        cost = network.optimize()
+        grid = expect_output_data(network.elements["Grid:import"].outputs()["connection_power"])
+        forward = expect_output_data(network.elements["Inverter:dc_to_ac"].outputs()["connection_power"])
+        reverse = expect_output_data(network.elements["Inverter:ac_to_dc"].outputs()["connection_power"])
+        np.testing.assert_allclose(grid.values, [0.9 + 1.0 / 0.91] * 3, atol=1e-6)
+        np.testing.assert_allclose(forward.values, [0.0] * 3, atol=1e-6)
+        np.testing.assert_allclose(reverse.values, [1.0 / 0.91] * 3, atol=1e-6)
+        expected_cost = (0.9 + 1.0 / 0.91) * (-0.1 * 0.25 - 0.3 + 0.15 * 0.5)
+        assert cost == pytest.approx(expected_cost, abs=1e-6)
+
+
+async def test_inverter_replans_directions_and_limits(
+    hub_entry: MockConfigEntry, inverter_participants: dict[str, ElementConfigData]
+) -> None:
+    """Warm input updates release previous choices and refresh directional limits.
+
+    Negative imports curtail solar; positive imports use it, respecting updated
+    post-efficiency caps. Increasing a cap and reversing prices must also work on
+    the same reusable network with changed period lengths.
+    """
+    participants = inverter_participants
+    participants["Solar"] = {
+        "element_type": ElementType.SOLAR,
+        "name": "Solar",
+        "connection": as_connection_target("Inverter"),
+        "forecast": {"forecast": 2.0},
+        "curtailment": {"curtailment": True},
+    }
+    grid_config = participants["Grid"]
+    inverter = participants["Inverter"]
+    assert grid_config["element_type"] == ElementType.GRID
+    assert inverter["element_type"] == ElementType.INVERTER
+    grid_config["pricing"]["price_source_target"] = -0.3
+    network, updaters = await create_network(hub_entry, periods_seconds=[900, 3600, 1800], participants=participants)
+    network.optimize()
+    grid = expect_output_data(network.elements["Grid:import"].outputs()["connection_power"])
+    np.testing.assert_allclose(grid.values, [0.9 + 1.0 / 0.91] * 3, atol=1e-6)
+
+    grid_config["pricing"]["price_source_target"] = 0.3
+    caps = np.array([0.4, 0.6, 0.2])
+    inverter["power_limits"]["max_power_source_target"] = caps
+    updaters["Grid"](grid_config)
+    updaters["Inverter"](inverter)
+    network.update_periods(np.array([0.2, 0.6, 1.1]))
+    network.optimize()
+    forward = expect_output_data(network.elements["Inverter:dc_to_ac"].outputs()["connection_power"])
+    grid = expect_output_data(network.elements["Grid:import"].outputs()["connection_power"])
+    np.testing.assert_allclose(forward.values, caps / 0.83, atol=1e-6)
+    np.testing.assert_allclose(grid.values, 0.9 - caps, atol=1e-6)
+
+    inverter["power_limits"]["max_power_source_target"] = 10.0
+    updaters["Inverter"](inverter)
+    network.optimize()
+    grid = expect_output_data(network.elements["Grid:import"].outputs()["connection_power"])
+    np.testing.assert_allclose(grid.values, [0.9 - 0.83] * 3, atol=1e-6)
+
+    grid_config["pricing"]["price_source_target"] = -0.3
+    updaters["Grid"](grid_config)
+    network.optimize()
+    grid = expect_output_data(network.elements["Grid:import"].outputs()["connection_power"])
+    np.testing.assert_allclose(grid.values, [0.9 + 1.0 / 0.91] * 3, atol=1e-6)
+
+
+async def test_inverter_custom_objective_cost_certificate(
+    hub_entry: MockConfigEntry, inverter_participants: dict[str, ElementConfigData]
+) -> None:
+    """Certify a feasible LP candidate against a horizon-wide economic bound.
+
+    Small artificial loss profits fit the requested tolerance; larger profits
+    require exact direction selection. Both return physical demand and honest
+    gaps. Integer solutions with invalid duals must not publish zero prices.
+    """
+    grid_config = inverter_participants["Grid"]
+    assert grid_config["element_type"] == ElementType.GRID
+    grid_config["pricing"]["price_source_target"] = np.array([-1e-5, -3e-5, 1.5e-5])
+    network, updaters = await create_network(
+        hub_entry, periods_seconds=[900, 3600, 1800], participants=inverter_participants
+    )
+    costs = network.cost()
+    assert costs is not None
+    assert costs[0] is not None
+    cost, gap = network.minimize(costs[0], absolute_tolerance=0.001)
+    required_import = 0.9 + 1.0 / 0.91
+    # Reverse output reaches 10 kW; 1 kW serves DC demand and 9 kW
+    # circulates forward at 83%. Independently calculate the relaxed bound.
+    relaxed_import = 0.9 + 10.0 / 0.91 - 9.0 * 0.83
+    expected_gap = (relaxed_import - required_import) * (1e-5 * 0.25 + 3e-5)
+    assert cost == pytest.approx(required_import * (-1e-5 * 0.25 - 3e-5 + 1.5e-5 * 0.5))
+    assert gap == pytest.approx(expected_gap)
+    assert 0 < gap < 0.001
+    assert len(expect_output_data(network.elements["AC"].outputs()[ELEMENT_POWER_BALANCE]).values) == 3
+
+    grid_config["pricing"]["price_source_target"] = np.array([-0.1, -0.3, 0.15])
+    updaters["Grid"](grid_config)
+    costs = network.cost()
+    assert costs is not None
+    assert costs[0] is not None
+    cost, gap = network.minimize(costs[0], absolute_tolerance=0.001)
+    assert cost == pytest.approx(required_import * (-0.1 * 0.25 - 0.3 + 0.15 * 0.5))
+    assert gap == pytest.approx(0.0, abs=1e-8)
+    grid = expect_output_data(network.elements["Grid:import"].outputs()["connection_power"])
+    np.testing.assert_allclose(grid.values, [required_import] * 3, atol=1e-6)
+    assert expect_output_data(network.elements["AC"].outputs()[ELEMENT_POWER_BALANCE]).values == ()

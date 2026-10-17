@@ -2,6 +2,25 @@
 
 The Inverter device composes a [Node](../model-layer/elements/node.md) (as a DC bus junction) with an implicit [Connection](../model-layer/connections/connection.md) to model bidirectional DC/AC power conversion with separate efficiency and power limits per direction.
 
+## Direction exclusivity
+
+The adapter explicitly pairs its DC-to-AC and AC-to-DC connections.
+Only one direction may carry power in each forecast period, across all source tags.
+This prevents negative import prices from rewarding fictitious energy dissipation through opposing conversions.
+Battery and grid directions retain their existing modelling.
+
+The solver first tries a continuous relaxation.
+If it contains opposing conversions, one candidate fixes directions from net DC-bus exchange and reoptimizes the entire model.
+A candidate is accepted only if its objective is within the caller's absolute horizon-wide tolerance of the relaxation's lower bound.
+Otherwise every heuristic fixing is removed and a mixed-integer solve chooses the directions.
+There is no solve timeout or repeated heuristic repair loop.
+
+Native economic, secondary and calibration solves all enforce this rule without adding an economic tolerance.
+Configured limits remain at their original position after efficiency losses.
+Missing direction bounds are derived by maximizing that flow with its opposite disabled; if no finite bound can be established, configure a finite inverter power limit.
+Input updates release previous choices and refresh bounds without accumulating solver rows.
+See [shadow prices](../shadow-prices.md) for reporting differences between the LP and integer paths.
+
 ## Model Elements Created
 
 ```mermaid

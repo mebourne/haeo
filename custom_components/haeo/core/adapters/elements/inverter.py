@@ -77,6 +77,7 @@ class InverterAdapter:
                 "name": f"{config['name']}:dc_to_ac",
                 "source": config["name"],
                 "target": extract_connection_target(config[CONF_CONNECTION]),
+                "exclusive_with": f"{config['name']}:ac_to_dc",
                 "segments": {
                     "efficiency": {
                         "segment_type": "efficiency",

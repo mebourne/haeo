@@ -4,6 +4,11 @@ Shadow prices are dual values from the linear programming optimization.
 They quantify how much the total objective would improve if a constraint were relaxed by one unit.
 In HAEO, shadow prices help explain why the optimizer makes certain decisions and highlight where additional flexibility creates the most value.
 
+An integer solve, including the fallback for opposing inverter conversions, does not provide valid LP duals.
+Shadow-price and derived marginal-price outputs are unknown/unavailable in that case, not zero.
+LP candidate prices describe the selected directions; they do not guarantee that a changed input would preserve those directions.
+Power, energy and tariff forecasts remain available on both solve paths.
+
 ## What shadow prices tell you
 
 Every constraint in the optimization problem has an associated shadow price.

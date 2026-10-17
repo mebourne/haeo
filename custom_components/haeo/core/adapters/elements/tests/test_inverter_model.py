@@ -71,6 +71,7 @@ CREATE_CASES: Sequence[CreateCase] = [
                 "name": "inverter_main:dc_to_ac",
                 "source": "inverter_main",
                 "target": "network",
+                "exclusive_with": "inverter_main:ac_to_dc",
                 "segments": {
                     "efficiency": {"segment_type": "efficiency", "efficiency": 1.0},
                     "power_limit": {"segment_type": "power_limit", "max_power": [10.0]},
@@ -110,6 +111,7 @@ CREATE_CASES: Sequence[CreateCase] = [
                 "name": "inverter_simple:dc_to_ac",
                 "source": "inverter_simple",
                 "target": "network",
+                "exclusive_with": "inverter_simple:ac_to_dc",
                 "segments": {
                     "efficiency": {"segment_type": "efficiency", "efficiency": 1.0},
                     "power_limit": {"segment_type": "power_limit", "max_power": [10.0]},
