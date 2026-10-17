@@ -71,7 +71,15 @@
             },
             "name": "Advanced settings"
           },
-          "common": { "data": { "horizon_preset": "Planning Horizon" }, "name": "Common settings" }
+          "common": { "data": { "horizon_preset": "Planning Horizon" }, "name": "Common settings" },
+          "reserve_policy": {
+            "data": { "enabled": "Enable battery reserve policy", "export_price": "Reserve export price cutoff" },
+            "data_description": {
+              "enabled": "Opt in to the experimental reserve policy. Leave off to keep the standard optimization. Turning it off keeps your battery, grid, and reserve settings so you can turn it on again later.",
+              "export_price": "Export price in $/kWh at or above which energy held in the reserve becomes eligible for export. The plan only exports it when that is economical; export is never required. The preferred minimum restricts sales, not household use or battery charging."
+            },
+            "name": "Experimental battery reserve policy"
+          }
         }
       }
     },
@@ -571,6 +579,9 @@
     },
     "no_history_at_time": {
       "message": "No history available at time {time} for: {missing}. The recorder may not have data this far back."
+    },
+    "reserve_policy_failed": {
+      "message": "Reserve planning failed: {reason}. Check the reserve settings, or turn off Experimental battery reserve policy to restore standard optimization."
     },
     "self_referential_field_missing": {
       "message": "Configuration error for field {field}: The entity created by this field was selected, but the field is missing from the stored configuration. This may indicate corrupted configuration data. Please recreate the element."

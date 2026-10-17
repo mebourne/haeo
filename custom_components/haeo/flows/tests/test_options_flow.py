@@ -3,7 +3,8 @@
 from typing import Any, cast
 
 from homeassistant.core import HomeAssistant
-from homeassistant.data_entry_flow import FlowResultType
+from homeassistant.data_entry_flow import FlowResultType, InvalidData
+import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 import voluptuous as vol
 
@@ -37,6 +38,7 @@ from custom_components.haeo.flows import (
     HORIZON_PRESETS,
     HUB_SECTION_ADVANCED,
     HUB_SECTION_COMMON,
+    HUB_SECTION_RESERVE_POLICY,
     HUB_SECTION_TIERS,
 )
 
@@ -217,3 +219,75 @@ async def test_options_flow_custom_tiers(hass: HomeAssistant) -> None:
     assert entry.data[HUB_SECTION_COMMON][CONF_HORIZON_PRESET] == HORIZON_PRESET_CUSTOM
     assert entry.data[HUB_SECTION_TIERS][CONF_TIER_1_COUNT] == 10
     assert entry.data[HUB_SECTION_TIERS][CONF_TIER_1_DURATION] == 2
+
+
+@pytest.mark.parametrize("preset", [HORIZON_PRESET_3_DAYS, HORIZON_PRESET_CUSTOM])
+async def test_reserve_options_preserve_release_horizons(hass: HomeAssistant, preset: str) -> None:
+    """Save, reopen, omit and disable reserve settings with release tiers; remove obsolete fields."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_INTEGRATION_TYPE: INTEGRATION_TYPE_HUB,
+            HUB_SECTION_COMMON: {CONF_NAME: "Home", CONF_HORIZON_PRESET: preset},
+            HUB_SECTION_TIERS: HORIZON_PRESETS[HORIZON_PRESET_3_DAYS],
+            HUB_SECTION_ADVANCED: {},
+            HUB_SECTION_RESERVE_POLICY: {"enabled": False, "export_price": 5.5, "import_price": 0.10},
+        },
+    )
+    entry.add_to_hass(hass)
+
+    async def submit(settings: dict[str, object] | None) -> None:
+        result = cast("FlowResultDict", await hass.config_entries.options.async_init(entry.entry_id))
+        fields = _get_section_schema(result["data_schema"], HUB_SECTION_RESERVE_POLICY).schema
+        assert {key.schema for key in fields} == {"enabled", "export_price"}
+        for key in fields:
+            assert key.default() == entry.data[HUB_SECTION_RESERVE_POLICY][key.schema]
+        user_input = _wrap_options_input(
+            {CONF_HORIZON_PRESET: preset}, {CONF_DEBOUNCE_SECONDS: 2, "advanced_mode": False}
+        )
+        if settings is not None:
+            user_input[HUB_SECTION_RESERVE_POLICY] = settings
+        result = cast(
+            "FlowResultDict",
+            await hass.config_entries.options.async_configure(result["flow_id"], user_input=user_input),
+        )
+        if preset == HORIZON_PRESET_CUSTOM:
+            assert result["step_id"] == "custom_tiers"
+            result = cast(
+                "FlowResultDict",
+                await hass.config_entries.options.async_configure(
+                    result["flow_id"], user_input={**HORIZON_PRESETS[HORIZON_PRESET_3_DAYS], CONF_TIER_1_COUNT: 7}
+                ),
+            )
+        assert result["type"] == FlowResultType.CREATE_ENTRY
+
+    await submit({"enabled": True, "export_price": 4.25})
+    assert entry.data[HUB_SECTION_RESERVE_POLICY] == {"enabled": True, "export_price": 4.25}
+    await submit(None)
+    assert entry.data[HUB_SECTION_RESERVE_POLICY] == {"enabled": True, "export_price": 4.25}
+    await submit({"enabled": False, "export_price": 4.25})
+    assert entry.data[HUB_SECTION_RESERVE_POLICY] == {"enabled": False, "export_price": 4.25}
+    assert entry.data[HUB_SECTION_COMMON] == {CONF_NAME: "Home", CONF_HORIZON_PRESET: preset}
+    expected_tiers = {**HORIZON_PRESETS[HORIZON_PRESET_3_DAYS]}
+    if preset == HORIZON_PRESET_CUSTOM:
+        expected_tiers[CONF_TIER_1_COUNT] = 7
+    assert entry.data[HUB_SECTION_TIERS] == expected_tiers
+
+
+@pytest.mark.parametrize("price", [-0.01, "invalid"])
+async def test_reserve_options_reject_invalid_cutoffs(hass: HomeAssistant, price: object) -> None:
+    """Reject negative or nonnumeric export cutoffs without changing the saved configuration."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            CONF_INTEGRATION_TYPE: INTEGRATION_TYPE_HUB,
+            HUB_SECTION_COMMON: {CONF_NAME: "Home", CONF_HORIZON_PRESET: HORIZON_PRESET_3_DAYS},
+        },
+    )
+    entry.add_to_hass(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    user_input = _wrap_options_input({CONF_HORIZON_PRESET: HORIZON_PRESET_3_DAYS})
+    user_input[HUB_SECTION_RESERVE_POLICY] = {"enabled": True, "export_price": price}
+    with pytest.raises(InvalidData):
+        await hass.config_entries.options.async_configure(result["flow_id"], user_input=user_input)
+    assert HUB_SECTION_RESERVE_POLICY not in entry.data

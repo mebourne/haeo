@@ -13,6 +13,7 @@ from . import (
     HORIZON_PRESET_CUSTOM,
     HUB_SECTION_ADVANCED,
     HUB_SECTION_COMMON,
+    HUB_SECTION_RESERVE_POLICY,
     HUB_SECTION_TIERS,
     get_custom_tiers_schema,
     get_hub_options_schema,
@@ -80,6 +81,9 @@ class HubOptionsFlow(config_entries.OptionsFlow):
             },
             CONF_RECORD_FORECASTS: self._user_input[HUB_SECTION_ADVANCED].get(CONF_RECORD_FORECASTS, False),
         }
+
+        if HUB_SECTION_RESERVE_POLICY in self._user_input:
+            new_data[HUB_SECTION_RESERVE_POLICY] = dict(self._user_input[HUB_SECTION_RESERVE_POLICY])
 
         self.hass.config_entries.async_update_entry(self.config_entry, data=new_data)
         return self.async_create_entry(title="", data={})

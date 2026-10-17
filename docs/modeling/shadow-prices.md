@@ -9,6 +9,9 @@ Shadow-price and derived marginal-price outputs are unknown/unavailable in that 
 LP candidate prices describe the selected directions; they do not guarantee that a changed input would preserve those directions.
 Power, energy and tariff forecasts remain available on both solve paths.
 
+The opt-in [experimental reserve policy](../user-guide/reserve-policy.md) can also require integer reserve decisions.
+It follows the same valid-dual reporting rule rather than assuming every reserve solve is a MILP.
+
 ## What shadow prices tell you
 
 Every constraint in the optimization problem has an associated shadow price.

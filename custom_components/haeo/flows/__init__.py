@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import logging
 from typing import TYPE_CHECKING, Any, Final
 
@@ -9,6 +10,7 @@ if TYPE_CHECKING:
     from custom_components.haeo.core.schema.elements import ElementType
 
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.data_entry_flow import section
 from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
@@ -25,6 +27,8 @@ from custom_components.haeo.core.const import (
     CONF_DEBOUNCE_SECONDS,
     CONF_HORIZON_PRESET,
     CONF_NAME,
+    CONF_RESERVE_ENABLED,
+    CONF_RESERVE_EXPORT_PRICE,
     CONF_TIER_1_COUNT,
     CONF_TIER_1_DURATION,
     CONF_TIER_2_COUNT,
@@ -34,6 +38,8 @@ from custom_components.haeo.core.const import (
     CONF_TIER_4_COUNT,
     CONF_TIER_4_DURATION,
     DEFAULT_DEBOUNCE_SECONDS,
+    DEFAULT_RESERVE_ENABLED,
+    DEFAULT_RESERVE_EXPORT_PRICE,
     DEFAULT_TIER_1_COUNT,
     DEFAULT_TIER_1_DURATION,
     DEFAULT_TIER_2_COUNT,
@@ -46,6 +52,7 @@ from custom_components.haeo.core.const import (
 from custom_components.haeo.core.const import HORIZON_PRESET_5_DAYS as HORIZON_PRESET_5_DAYS
 from custom_components.haeo.core.const import HUB_SECTION_ADVANCED as HUB_SECTION_ADVANCED
 from custom_components.haeo.core.const import HUB_SECTION_COMMON as HUB_SECTION_COMMON
+from custom_components.haeo.core.const import HUB_SECTION_RESERVE_POLICY as HUB_SECTION_RESERVE_POLICY
 from custom_components.haeo.core.const import HUB_SECTION_TIERS as HUB_SECTION_TIERS
 from custom_components.haeo.flows.field_schema import SectionDefinition, build_section_schema
 
@@ -189,6 +196,25 @@ def get_hub_setup_schema(suggested_name: str | None = None) -> vol.Schema:
         },
     }
     return vol.Schema(build_section_schema(sections, field_entries))
+
+
+def get_reserve_policy_schema(current: Mapping[str, object]) -> vol.Schema:
+    """Build optional reserve settings, replacing obsolete fields when submitted."""
+    return vol.Schema(
+        {
+            vol.Optional(
+                CONF_RESERVE_ENABLED,
+                default=current.get(CONF_RESERVE_ENABLED, DEFAULT_RESERVE_ENABLED),
+            ): bool,
+            vol.Required(
+                CONF_RESERVE_EXPORT_PRICE,
+                default=current.get(CONF_RESERVE_EXPORT_PRICE, DEFAULT_RESERVE_EXPORT_PRICE),
+            ): vol.All(
+                NumberSelector(NumberSelectorConfig(min=0, step="any", mode=NumberSelectorMode.BOX)),
+                vol.Coerce(float),
+            ),
+        }
+    )
 
 
 def get_custom_tiers_schema(config_entry: ConfigEntry | None = None) -> vol.Schema:
@@ -337,7 +363,12 @@ def get_hub_options_schema(config_entry: ConfigEntry) -> vol.Schema:
             ),
         },
     }
-    return vol.Schema(build_section_schema(sections, field_entries))
+    schema_dict = build_section_schema(sections, field_entries)
+    schema_dict[vol.Optional(HUB_SECTION_RESERVE_POLICY)] = section(
+        get_reserve_policy_schema(config_entry.data.get(HUB_SECTION_RESERVE_POLICY, {})),
+        {"collapsed": True},
+    )
+    return vol.Schema(schema_dict)
 
 
 def get_element_flow_classes() -> dict[ElementType, type]:
