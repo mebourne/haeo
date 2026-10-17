@@ -22,6 +22,7 @@ from homeassistant.helpers.typing import ConfigType
 from custom_components.haeo.const import (
     DOMAIN,
     ELEMENT_TYPE_NETWORK,
+    INPUT_ENTITY_READY_TIMEOUT,
     STATIC_CARD_BUNDLES,
     STATIC_CARD_STATIC_DIR,
     STATIC_CARD_STATIC_PATH,
@@ -58,9 +59,6 @@ INPUT_PLATFORMS: list[Platform] = [Platform.NUMBER, Platform.SWITCH]
 
 # Platforms that consume coordinator data (set up after coordinator)
 OUTPUT_PLATFORMS: list[Platform] = [Platform.SENSOR]
-
-# Timeout in seconds for waiting for input entities to be ready
-INPUT_ENTITY_READY_TIMEOUT = 5
 
 
 async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:

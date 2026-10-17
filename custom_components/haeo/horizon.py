@@ -11,6 +11,7 @@ The HorizonManager:
 - Provides callbacks for dependent components to subscribe to horizon changes
 """
 
+import asyncio
 from collections.abc import Callable
 from datetime import datetime
 
@@ -54,7 +55,7 @@ class HorizonManager:
         self._unsub_timer: CALLBACK_TYPE | None = None
 
         # Subscribers to horizon changes
-        self._subscribers: list[Callable[[], None]] = []
+        self._subscribers: list[tuple[Callable[[], asyncio.Future[None] | None], bool]] = []
 
         # Current forecast timestamps (cached)
         self._forecast_timestamps: tuple[float, ...] = ()
@@ -110,14 +111,17 @@ class HorizonManager:
         Updates timestamps to current time, notifies all subscribers,
         and restarts the update timer.
         """
-        self._update_timestamps()
-
-        # Notify all subscribers of the resumed horizon
-        for subscriber in self._subscribers:
-            subscriber()
-
-        # Restart the timer
+        self.advance()
         self._schedule_next_update()
+
+    def advance(self, *, manual: bool = False) -> tuple[asyncio.Future[None], ...]:
+        """Advance once without scheduling, returning subscriber-owned refresh tasks."""
+        self._update_timestamps()
+        return tuple(
+            task
+            for subscriber, manual_only in self._subscribers
+            if (manual or not manual_only) and (task := subscriber()) is not None
+        )
 
     def _schedule_next_update(self) -> None:
         """Schedule the next horizon update at the next period boundary."""
@@ -141,30 +145,28 @@ class HorizonManager:
     @callback
     def _async_scheduled_update(self, _now: datetime) -> None:
         """Handle scheduled update when period boundary is reached."""
-        self._update_timestamps()
-
-        # Notify all subscribers
-        for subscriber in self._subscribers:
-            subscriber()
-
-        # Schedule next update
+        self.advance()
         self._schedule_next_update()
 
-    def subscribe(self, callback_fn: Callable[[], None]) -> Callable[[], None]:
+    def subscribe(
+        self, callback_fn: Callable[[], asyncio.Future[None] | None], *, manual_only: bool = False
+    ) -> Callable[[], None]:
         """Subscribe to horizon changes.
 
         Args:
-            callback_fn: Function to call when horizon changes
+            callback_fn: Function returning an already-started refresh future, or None.
+            manual_only: Only notify during manual preparation, for scalar input refreshes.
 
         Returns:
             Unsubscribe function to remove the subscription
 
         """
-        self._subscribers.append(callback_fn)
+        subscription = (callback_fn, manual_only)
+        self._subscribers.append(subscription)
 
         def unsubscribe() -> None:
-            if callback_fn in self._subscribers:
-                self._subscribers.remove(callback_fn)
+            if subscription in self._subscribers:
+                self._subscribers.remove(subscription)
 
         return unsubscribe
 

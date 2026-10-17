@@ -5,6 +5,9 @@ from typing import Final, Literal
 # Integration domain
 DOMAIN: Final = "haeo"
 
+# Timeout in seconds for initial and manual input preparation
+INPUT_ENTITY_READY_TIMEOUT: Final = 5
+
 # External URLs
 URL_HAFO: Final = "https://hafo.haeo.io"
 

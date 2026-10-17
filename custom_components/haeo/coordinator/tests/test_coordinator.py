@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 from homeassistant.const import STATE_OFF, STATE_ON, EntityCategory, UnitOfEnergy
 from homeassistant.core import HomeAssistant, State
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import EventStateChangedData
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -1717,17 +1718,18 @@ async def test_async_run_optimization_runs_when_inputs_aligned(
 
 
 @pytest.mark.usefixtures("mock_battery_subentry", "mock_grid_subentry", "mock_runtime_data")
-async def test_async_run_optimization_skips_when_inputs_not_aligned(
+async def test_async_run_optimization_rejects_when_inputs_not_aligned(
     hass: HomeAssistant,
     mock_hub_entry: MockConfigEntry,
 ) -> None:
-    """async_run_optimization skips when inputs are not aligned."""
+    """Manual optimization reports unaligned automatic inputs without starting a refresh."""
     coordinator = HaeoDataUpdateCoordinator(hass, mock_hub_entry)
 
     # Mock _are_inputs_aligned to return False
     with (
         patch.object(coordinator, "_are_inputs_aligned", return_value=False),
         patch.object(coordinator, "async_refresh", new_callable=AsyncMock) as refresh_mock,
+        pytest.raises(HomeAssistantError, match="Inputs not aligned"),
     ):
         await coordinator.async_run_optimization()
 

@@ -1,5 +1,6 @@
 """Data update coordinator for the Home Assistant Energy Optimizer integration."""
 
+import asyncio
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -11,6 +12,7 @@ from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_ON, EntityCategory, UnitOfTime
 from homeassistant.core import CALLBACK_TYPE, Event, HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.event import EventStateChangedData, async_call_later, async_track_state_change_event
 from homeassistant.helpers.translation import async_get_translations
 from homeassistant.helpers.typing import StateType
@@ -21,6 +23,7 @@ import numpy as np
 from custom_components.haeo.const import (
     DOMAIN,
     ELEMENT_TYPE_NETWORK,
+    INPUT_ENTITY_READY_TIMEOUT,
     OPTIMIZATION_STATUS_FAILED,
     OPTIMIZATION_STATUS_PENDING,
     OPTIMIZATION_STATUS_SUCCESS,
@@ -470,7 +473,7 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         # If turned on, trigger optimization to catch up on any changes while disabled
         if is_enabled:
-            self.hass.async_create_task(self.async_run_optimization())
+            self.hass.async_create_task(self._async_automatic_refresh())
 
     def _apply_auto_optimize_state(self, *, is_enabled: bool) -> None:
         """Apply auto-optimize state to the horizon manager.
@@ -485,6 +488,10 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
             runtime_data.horizon_manager.resume()
         else:
             runtime_data.horizon_manager.pause()
+            if self._debounce_timer is not None:
+                self._debounce_timer()
+                self._debounce_timer = None
+            self._pending_refresh = False
 
     @property
     def auto_optimize_enabled(self) -> bool:
@@ -499,12 +506,37 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return runtime_data.auto_optimize_switch.is_on or False
 
     async def async_run_optimization(self) -> None:
-        """Manually trigger optimization, bypassing debouncing and auto-optimize check."""
-        if not self._are_inputs_aligned():
-            _LOGGER.debug("Inputs not aligned, skipping manual optimization")
-            return
+        """Await an explicit optimization, preparing a current horizon when paused."""
+        runtime_data = self._get_runtime_data()
+        if self._unloaded or runtime_data is None or self._shutdown_requested or self.hass.is_stopping:
+            msg = "Integration is not available for optimization"
+            raise HomeAssistantError(msg)
+        if self.auto_optimize_enabled and not self._are_inputs_aligned():
+            msg = "Inputs not aligned for optimization"
+            raise HomeAssistantError(msg)
 
         await self.async_refresh()
+
+        if (
+            self._unloaded
+            or self._get_runtime_data() is not runtime_data
+            or self._shutdown_requested
+            or self.hass.is_stopping
+        ):
+            msg = "Integration unloaded during optimization"
+            raise HomeAssistantError(msg)
+        if not self.last_update_success:
+            msg = f"Optimization failed: {self.last_exception}"
+            raise HomeAssistantError(msg) from self.last_exception
+
+    async def _async_automatic_refresh(self) -> None:
+        """Recheck automatic eligibility after acquiring HA's shared refresh lock."""
+        async with self._debounced_refresh.async_lock():
+            if self._unloaded or self._get_runtime_data() is None or not self.auto_optimize_enabled:
+                return
+            if not self._are_inputs_aligned():
+                return
+            await self._async_refresh(log_failures=True)
 
     @callback
     def signal_optimization_stale(self) -> None:
@@ -550,12 +582,14 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
     @callback
     def _maybe_trigger_refresh(self) -> None:
         """Trigger a coordinator refresh if inputs are aligned."""
+        if self._unloaded or not self.auto_optimize_enabled:
+            return
         if not self._are_inputs_aligned():
             _LOGGER.debug("Inputs not aligned, skipping optimization")
             return
 
         # Use create_task to run the async refresh
-        self.hass.async_create_task(self.async_refresh())
+        self.hass.async_create_task(self._async_automatic_refresh())
 
     def _are_inputs_aligned(self) -> bool:
         """Check if all forecast input entities have the same horizon start time.
@@ -681,6 +715,25 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 updater(element_config)
         self._pending_element_updates.clear()
 
+    async def _async_solve[T](self, solve: Callable[[], T]) -> T:
+        """Keep the refresh lock until an executor worker has actually stopped."""
+        future = asyncio.ensure_future(self.hass.async_add_executor_job(solve))
+        try:
+            return await asyncio.shield(future)
+        except asyncio.CancelledError:
+            # Cancelling an executor waiter cannot stop its running thread. Do
+            # not let the next refresh mutate that worker's network or periods.
+            while not future.done():
+                try:
+                    await asyncio.shield(future)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not future.cancelled():
+                future.exception()
+            raise
+
     async def _async_update_data(self) -> CoordinatorData:
         """Update data from input entities and run optimization."""
         # Check if optimization is already in progress
@@ -711,9 +764,35 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
             # Get forecast timestamps from horizon manager
             runtime_data = self._get_runtime_data()
-            if runtime_data is None:
+            if self._unloaded or runtime_data is None:
                 msg = "Runtime data not available"
                 raise UpdateFailed(msg)
+
+            if not self.auto_optimize_enabled:
+                # These are the same entity-owned loads used by automatic
+                # horizon updates, not an independent coordinator reload path.
+                pending = runtime_data.horizon_manager.advance(manual=True)
+                forecast_timestamps = runtime_data.horizon_manager.get_forecast_timestamps()
+                try:
+                    async with asyncio.timeout(INPUT_ENTITY_READY_TIMEOUT):
+                        results = await asyncio.gather(
+                            *(asyncio.shield(task) for task in pending), return_exceptions=True
+                        )
+                except TimeoutError as err:
+                    msg = "Timed out preparing inputs for optimization"
+                    raise UpdateFailed(msg) from err
+                if any(isinstance(result, BaseException) for result in results):
+                    msg = "Input refresh failed during optimization preparation"
+                    raise UpdateFailed(msg)
+                if self._unloaded or self._get_runtime_data() is not runtime_data:
+                    msg = "Integration unloaded during optimization preparation"
+                    raise UpdateFailed(msg)
+                if forecast_timestamps != runtime_data.horizon_manager.get_forecast_timestamps() or any(
+                    store.available and store.time_series and store.forecast_timestamps != forecast_timestamps
+                    for store in runtime_data.input_stores.values()
+                ):
+                    msg = "Inputs not aligned after optimization preparation"
+                    raise UpdateFailed(msg)
 
             forecast_timestamps = runtime_data.horizon_manager.get_forecast_timestamps()
 
@@ -752,7 +831,7 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._apply_pending_element_updates()
 
             # Perform the optimization
-            cost = await self.hass.async_add_executor_job(network.optimize)
+            cost = await self._async_solve(network.optimize)
 
             end_time = time.time()
             optimization_duration = end_time - start_time
@@ -844,7 +923,7 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
             completed_at = dt_util.utc_from_timestamp(end_time).astimezone()
 
-            if self._unloaded:
+            if self._unloaded or self._get_runtime_data() is not runtime_data:
                 msg = "Integration unloaded during optimization"
                 raise UpdateFailed(msg)
             return CoordinatorData(

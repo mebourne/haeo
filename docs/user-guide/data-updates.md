@@ -19,7 +19,7 @@ They appear with names like `number.{element}_{field}` (for example, `number.bat
 
 ## What triggers an optimization
 
-HAEO runs a new optimization when either of the following happens:
+With **Auto optimize** enabled, HAEO runs a new optimization when either of the following happens:
 
 - An input entity's state changes (new data arrives from a tracked sensor).
 - The optimization horizon advances past a period boundary.
@@ -38,8 +38,50 @@ Real optimization failures still make affected outputs unavailable.
 ## Manual refresh options
 
 Sometimes you want the latest recommendation right away.
-You can trigger a manual refresh from the entity details page or by calling the standard Home Assistant update service for any HAEO sensor.
-Manual refreshes skip the waiting period and start a new optimisation as soon as they are invoked.
+Call the `haeo.optimize` action and select your HAEO configuration entry.
+It bypasses automatic debouncing and waits for the optimization to finish.
+Unavailable inputs or a failed optimization produce an action error rather than silently leaving the old result as a successful refresh.
+
+### Control optimization from an automation
+
+Turn **Auto optimize** off on the HAEO network device, then call `haeo.optimize` from your automation whenever you want a new plan.
+Input entities still track source sensors, but input changes and horizon boundaries no longer trigger automatic optimizations.
+Each explicit call advances the horizon to the current period, waits for forecast inputs to reload, and solves once without restarting the horizon timer.
+Preset hour alignment and custom tier settings are unchanged: the trigger interval does not need to match the finest tier duration.
+
+For example, run every five minutes:
+
+```yaml
+alias: HAEO optimize every five minutes
+triggers:
+  - trigger: time_pattern
+    minutes: /5
+conditions:
+  - condition: template
+    value_template: "{{ is_state('switch.optimizer_auto_optimize', 'off') }}"
+actions:
+  - action: haeo.optimize
+    data:
+      config_entry: YOUR_HAEO_ENTRY_ID
+mode: single
+```
+
+Replace the switch entity and configuration entry ID with yours.
+To find the entry ID, select **HAEO: Optimize** and your entry in Developer Tools → Actions, then switch to YAML mode and copy `config_entry`.
+Use `mode: single` to avoid accumulating runs if optimization takes longer than the trigger interval.
+The five-minute example is a clock schedule; it does not wait for a price provider to publish new data.
+You can instead trigger on the relevant source update, allowing related inputs to settle before calling the action.
+
+While automatic optimization is disabled:
+
+- The integration still performs its initial optimization when it starts or reloads.
+- Turning the switch off discards pending automatic requests; a solve already running can finish.
+- Explicit calls run serially and each prepares its own current horizon.
+- Between successful calls, outputs hold the last published recommendation; HAEO does not automatically step through the old forecast.
+- Input preparation has a five-second timeout. A failed run retains the existing failure/unavailability behavior.
+
+Turning **Auto optimize** back on advances the horizon, requests an optimization, and resumes automatic updates.
+Choose a manual trigger interval that is safe for your system; reducing recalculation does not replace inverter safety limits or rate limiting in control automations.
 
 ## Troubleshooting stale data
 

@@ -1,5 +1,6 @@
 """Number entity for HAEO input configuration."""
 
+import asyncio
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime
@@ -84,6 +85,7 @@ class HaeoInputNumber(NumberEntity):
         )
         self._horizon_manager = horizon_manager
         self._uses_forecast = field_info.time_series
+        self._load_tasks: set[asyncio.Task[None]] = set()
 
         # When True the entity surfaces the running (positive) value while the
         # backing store holds its negative. Used by surfaced policy mirrors.
@@ -219,6 +221,10 @@ class HaeoInputNumber(NumberEntity):
         # Subscribe to horizon manager for consistent time windows
         if self._uses_forecast:
             self.async_on_remove(self._horizon_manager.subscribe(self._handle_horizon_change))
+        elif self._store.mode == InputMode.DRIVEN:
+            # A manual call may immediately follow a source state write, before
+            # its state-change callback has loaded the new scalar (e.g. SOC).
+            self.async_on_remove(self._horizon_manager.subscribe(self._schedule_load, manual_only=True))
 
         if self._store.mode == InputMode.EDITABLE:
             # Refresh to signal readiness (mirrors previous _update_editable_forecast path)
@@ -237,6 +243,13 @@ class HaeoInputNumber(NumberEntity):
             # Load initial data
             await self._async_load_and_sync()
 
+    async def async_will_remove_from_hass(self) -> None:
+        """Cancel owned input loads before the entity is removed."""
+        for task in self._load_tasks:
+            task.cancel()
+        await asyncio.gather(*self._load_tasks, return_exceptions=True)
+        await super().async_will_remove_from_hass()
+
     def _apply_recorder_attribute_filtering(self) -> None:
         """Apply recorder filtering to this entity's runtime state info."""
         if self._record_forecasts:
@@ -244,17 +257,18 @@ class HaeoInputNumber(NumberEntity):
         self._state_info["unrecorded_attributes"] = FORECAST_UNRECORDED_ATTRIBUTES
 
     @callback
-    def _handle_horizon_change(self) -> None:
+    def _handle_horizon_change(self) -> asyncio.Task[None] | None:
         """Handle horizon change - refresh with new time windows."""
         if not self._uses_forecast:
-            return
+            return None
         if self._store.mode == InputMode.EDITABLE:
             with self._suppress_self_notifications():
                 self._store.refresh()
             self._sync_from_store()
             self.async_write_ha_state()
         else:
-            self.hass.async_create_task(self._async_load_sync_and_update())
+            return self._schedule_load()
+        return None
 
     @callback
     def _handle_store_change(self) -> None:
@@ -267,7 +281,14 @@ class HaeoInputNumber(NumberEntity):
     @callback
     def _handle_source_state_change(self, _event: Event[EventStateChangedData]) -> None:
         """Handle source entity state change."""
-        self.hass.async_create_task(self._async_load_sync_and_update())
+        self._schedule_load()
+
+    def _schedule_load(self) -> asyncio.Task[None]:
+        """Start an entity-owned load that can be awaited by a manual refresh."""
+        task = self.hass.async_create_task(self._async_load_sync_and_update())
+        self._load_tasks.add(task)
+        task.add_done_callback(self._load_tasks.discard)
+        return task
 
     async def _async_load_sync_and_update(self) -> None:
         """Load data, sync attributes, and write state."""
