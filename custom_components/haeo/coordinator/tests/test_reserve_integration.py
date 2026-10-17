@@ -174,13 +174,16 @@ async def test_reserve_setup_reload_and_opt_out(hass: HomeAssistant) -> None:
     assert float(outputs["sensor.market_export_power"]["state"]) == 0
     imports = outputs["sensor.market_import_power"]["attributes"].get("forecast")
     assert isinstance(imports, list)
-    assert max(float(p["value"]) for p in imports[:5]) == 0
-    # A fresh coordinator must publish the same economic household supply.
+    assert min(float(p["value"]) for p in imports[:5]) > 0
+    soc_forecast = outputs["sensor.storage_state_of_charge"]["attributes"].get("forecast")
+    assert isinstance(soc_forecast, list)
+    assert [float(p["value"]) for p in soc_forecast[:6]] == pytest.approx([25] * 6)
+    # A fresh coordinator must preserve reserve without forced restoration.
     entity_ids = set(outputs)
     assert await hass.config_entries.async_reload(entry.entry_id)
     await hass.async_block_till_done()
     assert set(get_output_sensors(hass, entry)) == entity_ids
-    assert float(get_output_sensors(hass, entry)["sensor.market_import_power"]["state"]) == 0
+    assert float(get_output_sensors(hass, entry)["sensor.market_import_power"]["state"]) > 0
 
     # The stored hourly cost is unchanged; switching off restores the native LP.
     hass.config_entries.async_update_entry(entry, data={**entry.data, HUB_SECTION_RESERVE_POLICY: {"enabled": False}})
@@ -190,7 +193,7 @@ async def test_reserve_setup_reload_and_opt_out(hass: HomeAssistant) -> None:
     assert entity_ids <= set(get_output_sensors(hass, entry))
     hass.config_entries.async_update_entry(entry, data={**entry.data, HUB_SECTION_RESERVE_POLICY: {"enabled": True}})
     await hass.async_block_till_done(wait_background_tasks=True)
-    assert float(get_output_sensors(hass, entry)["sensor.market_import_power"]["state"]) == 0
+    assert float(get_output_sensors(hass, entry)["sensor.market_import_power"]["state"]) > 0
 
     # Failed fresh solves must not expose last-success scalar states as current.
     hass.states.async_set("sensor.observed_soc", "5", {"unit_of_measurement": "%"})

@@ -220,6 +220,19 @@ class ReservePlanner:
         solver = network._solver  # noqa: SLF001 (reserve planning owns this isolated model's solve lifecycle)
         for element in network.elements.values():
             element.constraints()
+        # Provenance does not prevent opposing conversion, even with different
+        # sources. Negative tariffs otherwise reward burning energy in a loop.
+        forward = f"{self.inverter_name}:dc_to_ac"
+        reverse = f"{self.inverter_name}:ac_to_dc"
+        direction = solver.addVariables(len(self.periods), lb=0, ub=1, type=HighsVarType.kInteger, out_array=True)
+        for t in range(len(self.periods)):
+            solver.addConstr(
+                connections[forward].segments["power_limit"].total_power_in[t] <= self.limits[forward][t] * direction[t]
+            )
+            solver.addConstr(
+                connections[reverse].segments["power_limit"].total_power_in[t]
+                <= self.limits[reverse][t] * (1 - direction[t])
+            )
         return _Model(network, solver, battery, exports.total_power_in, battery_exports)
 
     @staticmethod
@@ -240,28 +253,50 @@ class ReservePlanner:
         return model.solver.getObjectiveValue()
 
     def solve(self) -> ReserveResult:
-        """Optimize all economics with a conditional preferred floor after ordinary sales."""
+        """Protect reserve outside qualifying price periods without imposing replenishment."""
         model = self._build()
         h = model.solver
         n = len(self.periods)
         energy = model.battery.stored_energy
-        ordinary_sold = h.addVariables(n, lb=0, ub=1, type=HighsVarType.kInteger, out_array=True)
+        # A fixed reserve floor already proves the ordinary-sale obligation
+        # when no qualifying period or initial deficit can open the lower band.
+        ordinary_sold = (
+            h.addVariables(n, lb=0, ub=1, type=HighsVarType.kInteger, out_array=True)
+            if self.initial < self.reserve or np.any(self.qualifying)
+            else None
+        )
+        reserve_accessible = self.initial < self.reserve
         for t in range(n):
             # A positive ordinary battery sale protects every later boundary.
-            # With no such sale the markers can stay zero: household use and
-            # qualifying trades are free to draw down to the native hard floor.
-            if t:
+            if ordinary_sold is not None and t:
                 h.addConstr(ordinary_sold[t] >= ordinary_sold[t - 1])
-            if not self.qualifying[t]:
-                h.addConstr(model.battery_exports[t] <= self.limits[f"{self.grid_name}:export"][t] * ordinary_sold[t])
-                # Battery-supplied local use can free solar for export. Count
-                # that incremental sale too, independent of source-tag routing.
-                h.addConstr(
-                    model.exports[t]
-                    <= self.solar_only[t]
-                    + (self.limits[f"{self.grid_name}:export"][t] - self.solar_only[t]) * ordinary_sold[t],
-                )
-            h.addConstr(energy[t + 1] >= self.reserve * ordinary_sold[t])
+            if self.qualifying[t]:
+                reserve_accessible = True
+            else:
+                # Ordinary use cannot lower stock below min(current, reserve).
+                # A real deficit can remain, but replenished stock is protected.
+                # Before any possible deficit, the fixed reserve floor suffices.
+                if not reserve_accessible:
+                    h.addConstr(energy[t + 1] >= self.reserve)
+                elif not t:
+                    h.addConstr(energy[t + 1] >= min(self.initial, self.reserve))
+                else:
+                    above_reserve = h.addVariable(lb=0, ub=1, type=HighsVarType.kInteger)
+                    h.addConstr(energy[t + 1] >= self.reserve * above_reserve)
+                    h.addConstr(energy[t + 1] >= energy[t] - (self.usable - self.reserve) * above_reserve)
+                if ordinary_sold is not None:
+                    h.addConstr(
+                        model.battery_exports[t] <= self.limits[f"{self.grid_name}:export"][t] * ordinary_sold[t]
+                    )
+                    # Battery-supplied local use can free solar for export. Count
+                    # that incremental sale too, independent of source-tag routing.
+                    h.addConstr(
+                        model.exports[t]
+                        <= self.solar_only[t]
+                        + (self.limits[f"{self.grid_name}:export"][t] - self.solar_only[t]) * ordinary_sold[t],
+                    )
+            if ordinary_sold is not None:
+                h.addConstr(energy[t + 1] >= self.reserve * ordinary_sold[t])
         h.setOptionValue("solver", "choose")
         h.setOptionValue("mip_rel_gap", 0.0)
         h.setOptionValue("mip_abs_gap", OBJECTIVE_TOLERANCE)

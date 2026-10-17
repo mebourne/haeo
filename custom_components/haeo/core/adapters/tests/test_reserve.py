@@ -5,11 +5,9 @@ from collections.abc import Sequence
 import numpy as np
 import pytest
 
-from custom_components.haeo.core.adapters.elements.policy import extract_policy_rules
-from custom_components.haeo.core.adapters.policy_compilation import compile_policies
-from custom_components.haeo.core.adapters.registry import ELEMENT_TYPES, collect_model_elements
+from custom_components.haeo.core.adapters.registry import ELEMENT_TYPES
 from custom_components.haeo.core.adapters.reserve import ReservePlanner, ReservePolicy, ReserveResult
-from custom_components.haeo.core.model import Network, OutputData
+from custom_components.haeo.core.model import OutputData
 from custom_components.haeo.core.schema import as_connection_target
 from custom_components.haeo.core.schema.elements import ElementConfigData, ElementType
 
@@ -137,7 +135,8 @@ def test_current_spike_prices_local_supply_without_expensive_reserve_buyback(
     ("soc", "prices", "hours", "expected_now", "expected_later"),
     [
         (0.725, [8, 10, 0.15, 0.15, 0.15, 0.15, 0.15], [1] * 7, 9.399, 9.399),
-        (0.60, [4, 20, 0.15, 0.15, 0.15, 0.15, 0.15], [1, 2, 1, 1, 1, 1, 1], 0, 6.8224375),
+        # The two-hour sale uses 50 SOC points less three hours of local supply.
+        (0.60, [4, 20, 0.15, 0.15, 0.15, 0.15, 0.15], [1, 2, 1, 1, 1, 1, 1], 0, 7.9575625),
     ],
     ids=["capture_both", "save_for_twenty"],
 )
@@ -154,13 +153,13 @@ def test_qualifying_events_share_the_safe_energy_budget(
 
 @pytest.mark.parametrize("soc", [0.21, 0.30 - 0.0000001, 0.30, 0.30 + 0.0000001])
 def test_ordinary_sales_remain_protected_at_the_preferred_boundary(soc: float) -> None:
-    """Local supply can use reserve while ordinary exports cannot spend it."""
+    """Neither ordinary exports nor local supply spend protected stock, including a cold low-SOC start."""
     participants = reserve_participants(soc=soc, prices=[0.15] * 7)
     result = ReservePlanner(participants, np.ones(7), ReservePolicy()).solve()
     outputs = reserve_outputs(result, participants)
     assert max(outputs["Market"]["grid_power_export"].values) < 1e-5
     assert max(outputs["Storage"]["battery_power_charge"].values[:5]) < 1e-5
-    assert min(outputs["Storage"]["battery_state_of_charge"].values) >= 0.10 - 1e-5
+    assert min(outputs["Storage"]["battery_state_of_charge"].values) == pytest.approx(min(soc, 0.30), abs=1e-8)
 
 
 def test_asymmetric_periods_protect_the_physical_prefix_before_refill() -> None:
@@ -171,10 +170,37 @@ def test_asymmetric_periods_protect_the_physical_prefix_before_refill() -> None:
     outputs = reserve_outputs(result, participants)
     assert outputs["Market"]["grid_power_export"].values[0] == pytest.approx(9.399, abs=1e-4)
     early_discharge = ((9.999 / 0.95 + 0.165) / 0.95) * 0.25
-    later_discharge = (0.6 / 0.9025 + 0.165 / 0.95) * sum(periods[1:5])
-    expected_soc = (40.3 * 0.30 - early_discharge - later_discharge) / 40.3
-    assert min(outputs["Storage"]["battery_state_of_charge"].values) == pytest.approx(expected_soc, abs=1e-5)
+    expected_soc = (40.3 * 0.30 - early_discharge) / 40.3
+    assert outputs["Storage"]["battery_state_of_charge"].values[1:6] == pytest.approx([expected_soc] * 5, abs=1e-5)
     assert max(outputs["Storage"]["battery_power_charge"].values[:5]) < 1e-5
+
+
+@pytest.mark.parametrize(("house_kw", "overhead_kw"), [(0.0, 0.0), (0.3, 0.165)])
+def test_future_negative_imports_do_not_drain_battery_through_inverter_losses(
+    house_kw: float, overhead_kw: float
+) -> None:
+    """Before paid charging, only real local demand drains SOC, with no opposing inverter flows."""
+    participants = reserve_participants(soc=0.62, prices=[-0.20] * 3, imports=[0.30, -0.10, 0.30], solar=[0] * 3)
+    for name, power in (("House", house_kw), ("Idle", overhead_kw)):
+        load = participants[name]
+        assert load["element_type"] == ElementType.LOAD
+        load["forecast"]["forecast"] = np.full(3, power)
+    result = ReservePlanner(participants, np.array([12.0, 4.0, 1.0]), ReservePolicy()).solve()
+    outputs = reserve_outputs(result, participants)
+    expected_soc = 0.62 - 12 * (house_kw / 0.95 + overhead_kw) / 0.95 / 40.3
+    assert outputs["Storage"]["battery_state_of_charge"].values[1] == pytest.approx(expected_soc, abs=1e-5)
+    assert outputs["Market"]["grid_power_import"].values[0] < 1e-5
+    assert outputs["Market"]["grid_power_import"].values[1] > 0
+    assert max(outputs["Market"]["grid_power_export"].values) < 1e-5
+    assert (
+        np.max(
+            np.minimum(
+                outputs["Converter"]["inverter_power_dc_to_ac"].values,
+                outputs["Converter"]["inverter_power_ac_to_dc"].values,
+            )
+        )
+        < 1e-5
+    )
 
 
 def test_solar_saturation_does_not_warrant_battery_export() -> None:
@@ -200,7 +226,7 @@ def test_ordinary_sale_cannot_manufacture_reserve_use_for_a_later_spike() -> Non
 
 @pytest.mark.parametrize("house_kw", [0.6, 2.0])
 def test_cold_low_soc_can_buy_for_household_use_without_forced_battery_refill(house_kw: float) -> None:
-    """Insufficient inventory must permit grid support, not an expensive reserve debt."""
+    """A cold reserve deficit stays protected while grid supplies demand, without expensive forced refill."""
     participants = reserve_participants(soc=0.20, prices=[0.15] * 7)
     house = participants["House"]
     assert house["element_type"] == ElementType.LOAD
@@ -210,7 +236,7 @@ def test_cold_low_soc_can_buy_for_household_use_without_forced_battery_refill(ho
     assert max(outputs["Market"]["grid_power_export"].values) < 1e-5
     assert sum(outputs["Market"]["grid_power_import"].values[:5]) > 0
     assert max(outputs["Storage"]["battery_power_charge"].values[:5]) < 1e-5
-    assert min(outputs["Storage"]["battery_state_of_charge"].values) >= 0.10 - 1e-5
+    assert outputs["Storage"]["battery_state_of_charge"].values[:6] == pytest.approx([0.20] * 6, abs=1e-5)
 
 
 @pytest.mark.parametrize("imports", [[22, 10], [22, 10, 0.10]])
@@ -251,25 +277,50 @@ def test_ordinary_trading_can_reoptimize_charging_above_the_old_import_cutoff(im
     assert min(outputs["Storage"]["battery_state_of_charge"].values) >= 0.30 - 1e-5
 
 
-def test_reserve_does_not_restrict_economic_household_use() -> None:
-    """Preferred stock protects sales, not household supply or a recharge target."""
+def test_household_use_preserves_reserve_without_qualifying_prices() -> None:
+    """Ordinary household demand uses normal stock then grid supply, without buying reserve restoration."""
     participants = reserve_participants(soc=0.305, prices=[0.15] * 6, imports=[4] * 6, solar=[0] * 6)
     result = ReservePlanner(participants, np.ones(6), ReservePolicy()).solve()
     outputs = reserve_outputs(result, participants)
-    expected_soc = 0.305 - 6 * (0.6 / 0.9025 + 0.165 / 0.95) / 40.3
-    assert min(outputs["Storage"]["battery_state_of_charge"].values) == pytest.approx(expected_soc, abs=1e-5)
-    assert max(outputs["Market"]["grid_power_import"].values) < 1e-5
+    assert min(outputs["Storage"]["battery_state_of_charge"].values) == pytest.approx(0.30, abs=1e-5)
+    assert min(outputs["Market"]["grid_power_import"].values) > 0
     assert max(outputs["Market"]["grid_power_export"].values) < 1e-5
     assert max(outputs["Storage"]["battery_power_charge"].values) < 1e-5
 
 
-@pytest.mark.parametrize(("price", "expected_export"), [(3.99, 0), (4, 6.5174)])
-def test_export_cutoff_changes_sale_permission_not_household_use(price: float, expected_export: float) -> None:
-    """The cutoff is inclusive; rejecting a sale does not impose a household floor."""
+@pytest.mark.parametrize(("price", "expected_export", "expected_soc"), [(3.99, 0, 0.30), (4, 6.5174, 0.10)])
+def test_export_cutoff_qualifies_reserve_use(price: float, expected_export: float, expected_soc: float) -> None:
+    """The inclusive export cutoff unlocks reserve; below it both ordinary sales and household use protect stock."""
     participants = reserve_participants(prices=[price], imports=[22], solar=[0])
     outputs = reserve_outputs(ReservePlanner(participants, np.ones(1), ReservePolicy()).solve(), participants)
     assert outputs["Market"]["grid_power_export"].values[0] == pytest.approx(expected_export, abs=1e-4)
-    assert outputs["Storage"]["battery_state_of_charge"].values[1] < 0.30
+    assert outputs["Storage"]["battery_state_of_charge"].values[1] == pytest.approx(expected_soc, abs=1e-5)
+
+
+def test_future_qualifying_price_does_not_unlock_earlier_household_use() -> None:
+    """Protect the pre-spike reserve, allow qualifying depletion, then hold the deficit without expensive refill."""
+    participants = reserve_participants(soc=0.305, prices=[0.15, 20, 0.15], imports=[22] * 3, solar=[0] * 3)
+    outputs = reserve_outputs(ReservePlanner(participants, np.ones(3), ReservePolicy()).solve(), participants)
+    assert outputs["Storage"]["battery_state_of_charge"].values == pytest.approx([0.305, 0.30, 0.10, 0.10], abs=1e-5)
+    assert outputs["Market"]["grid_power_export"].values == pytest.approx([0, 6.5174, 0], abs=1e-4)
+    assert outputs["Market"]["grid_power_import"].values[2] == pytest.approx(0.6 + 0.165 / 0.93, abs=1e-4)
+    assert max(outputs["Storage"]["battery_power_charge"].values) < 1e-5
+
+
+def test_partial_replenishment_becomes_protected_without_a_refill_target() -> None:
+    """Cheap charging can partially restore reserve; later household demand cannot consume that restored stock."""
+    participants = reserve_participants(soc=0.20, prices=[0] * 3, imports=[10, 0.10, 10], solar=[0] * 3)
+    battery = participants["Storage"]
+    assert battery["element_type"] == ElementType.BATTERY
+    battery["power_limits"]["max_power_target_source"] = 1.0
+    outputs = reserve_outputs(ReservePlanner(participants, np.ones(3), ReservePolicy()).solve(), participants)
+    restored_soc = 0.20 + 1 / 40.3
+    assert outputs["Storage"]["battery_state_of_charge"].values == pytest.approx(
+        [0.20, 0.20, restored_soc, restored_soc], abs=1e-5
+    )
+    assert outputs["Storage"]["battery_power_charge"].values[0] < 1e-5
+    assert outputs["Storage"]["battery_power_charge"].values[2] < 1e-5
+    assert min(outputs["Market"]["grid_power_import"].values) > 0
 
 
 def test_ordinary_sale_is_omitted_when_a_later_qualifying_event_uses_reserve() -> None:
@@ -290,24 +341,37 @@ def test_solar_export_below_preferred_level_does_not_require_refill_or_extra_bat
     assert outputs["Storage"]["battery_power_charge"].values[0] < 1e-5
 
 
-def test_reserve_preserves_native_flow_economics_without_ordinary_sales() -> None:
-    """Surplus solar retains native economics and bounds without extra direction restrictions."""
+def test_full_battery_solar_surplus_does_not_cycle_inverter() -> None:
+    """Curtail surplus solar at full SOC without unnecessary grid exchange or opposing inverter conversion."""
     participants = reserve_participants(soc=1.0, prices=[0], imports=[0.30], solar=[14])
     periods = np.ones(1)
-    rules = [
-        rule
-        for config in participants.values()
-        if config["element_type"] == ElementType.POLICY
-        for rule in extract_policy_rules(config)
-    ]
-    compiled = compile_policies(collect_model_elements(participants), rules)
-    native = Network(name="Native flow economics", periods=periods)
-    for config in compiled["elements"]:
-        native.add(config)
-    native_cost = native.optimize()
     result = ReservePlanner(participants, periods, ReservePolicy()).solve()
     outputs = reserve_outputs(result, participants)
-    assert result.cost == pytest.approx(native_cost, abs=0.001)
     assert outputs["Market"]["grid_power_export"].values[0] < 1e-5
     assert outputs["Market"]["grid_power_import"].values[0] < 1e-5
     assert outputs["Storage"]["battery_state_of_charge"].values == pytest.approx([1.0, 1.0], abs=1e-5)
+    assert outputs["Converter"]["inverter_power_dc_to_ac"].values[0] == pytest.approx(0.6 / 0.95, abs=1e-5)
+    assert outputs["Converter"]["inverter_power_ac_to_dc"].values[0] < 1e-5
+
+
+def test_negative_imports_do_not_fund_cross_source_inverter_circulation() -> None:
+    """Solar serves its DC load directly instead of crossing grid imports to inflate conversion losses."""
+    participants = reserve_participants(soc=0.62, prices=[0], imports=[-0.10], solar=[1])
+    for name, power in (("House", 0.9), ("Idle", 1.0)):
+        load = participants[name]
+        assert load["element_type"] == ElementType.LOAD
+        load["forecast"]["forecast"] = np.array([power])
+    battery = participants["Storage"]
+    assert battery["element_type"] == ElementType.BATTERY
+    battery["power_limits"] = {"max_power_source_target": 0.0, "max_power_target_source": 0.0}
+    grid = participants["Market"]
+    assert grid["element_type"] == ElementType.GRID
+    grid["power_limits"]["max_power_target_source"] = 0.0
+    solar = participants["PV"]
+    assert solar["element_type"] == ElementType.SOLAR
+    solar["curtailment"]["curtailment"] = False
+    outputs = reserve_outputs(ReservePlanner(participants, np.ones(1), ReservePolicy()).solve(), participants)
+    assert outputs["Market"]["grid_power_import"].values[0] == pytest.approx(0.9, abs=1e-5)
+    assert outputs["Converter"]["inverter_power_dc_to_ac"].values[0] < 1e-5
+    assert outputs["Converter"]["inverter_power_ac_to_dc"].values[0] < 1e-5
+    assert outputs["Storage"]["battery_state_of_charge"].values == pytest.approx([0.62, 0.62], abs=1e-5)

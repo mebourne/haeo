@@ -44,7 +44,7 @@ Use the existing battery partition settings:
 
 | Setting                       | Example               | Meaning                                                                    |
 | ----------------------------- | --------------------- | -------------------------------------------------------------------------- |
-| Limits: minimum charge level  | 30%                   | Preferred minimum protecting ordinary battery sales                        |
+| Limits: minimum charge level  | 30%                   | Reserve level protecting ordinary household use and battery sales          |
 | Undercharge: percentage       | 10%                   | Exact hard physical/model floor                                            |
 | Undercharge: cost             | Existing value        | Kept in configuration, not used while the policy is enabled                |
 | Limits: maximum charge level  | 95%                   | Preferred upper level                                                      |
@@ -90,9 +90,16 @@ A later refill cannot excuse an earlier dip.
 If a valuable forecast needs stock below 30%, the optimizer can omit the preceding ordinary sale and use down to the hard 10% floor for that opportunity.
 This is stricter than merely preserving the reserve trajectory of a separate qualifying-only reference plan.
 
-Household supply alone never triggers this guard.
-Without ordinary battery sales, household consumption can use energy below 30%, and the battery need not be refilled to 30%.
-Solar-only surplus may also export below 30% without forcing a refill.
+**Protect stock outside qualifying price periods.**
+Ordinary household use must not deliberately consume the reserve, even when there are no battery sales.
+In each below-cutoff period, the ending SOC must be at least the lower of its starting SOC and the reserve level.
+Starting at or above 30% therefore keeps at least 30% unless a qualifying price period uses reserve.
+Starting at 20%, or reaching 20% after a qualifying event, can remain at 20% without forcing a refill, but ordinary use cannot lower it further.
+If economical charging raises that stock to 25%, the restored stock is protected too.
+A future qualifying price does not unlock reserve for earlier ordinary household use.
+The export-price cutoff qualifies a period; it does not force an export or classify a sale as observed rather than forecast.
+
+Solar-only surplus may export below 30% without forcing a refill.
 Battery use that frees extra solar for sale counts as a battery-assisted sale, so source-tag routing cannot evade the guard.
 When starting below 30%, economic charging may enable a later ordinary sale; earlier low SOC is not retroactively prohibited.
 
@@ -100,11 +107,19 @@ Charging has no reserve-specific price, debt, target or deadline.
 It can change economically to support a profitable trade, but removing the trade also removes its conditional preferred-floor obligation.
 All quantities, household supply and charging remain joint decisions; qualifying exports are not frozen by a preliminary solve.
 
-Directional flows retain the native continuous model, including its configured losses, power limits and source-provenance constraints.
-As in native HAEO, both directions may be positive within a forecast period; reserve mode adds no direction-exclusivity switches.
-Only the conditional sale guard uses binary variables: one per forecast period, rather than four.
+The inverter may convert in only one direction per period.
+Otherwise negative import forecasts can reward fictitious circulation that destroys battery energy to make room for later paid charging.
+This is a physical model constraint, not a reserve price adjustment or an economic tie-breaker.
+The configured post-efficiency power limits and source-provenance constraints are preserved.
+Battery and grid directional flows otherwise retain native modelling; this change does not add separate switches for them.
+
+Binary variables enforce inverter direction, the conditional sale guard and protected-stock transitions where a reserve deficit is possible.
+When initial SOC is at or above reserve and no forecast price qualifies, a fixed reserve floor makes sale and stock-transition switches unnecessary: only one inverter-direction binary per period remains.
 The solve remains a mixed-integer program, **not a pure LP**.
 There is no separate reserve-inventory model, qualifying-release marker, certificate or reference solve.
+
+When no forecast export price qualifies, reserve is not available for ordinary consumption.
+This is not a promise of identical output arrays to native mode: native uses a finite hourly deficit penalty instead of these hard stock constraints, and does not enforce inverter direction exclusivity.
 
 The solve accepts a \$0.001 absolute economic-objective gap with no relative gap.
 This bounds the gap to the best predicted economic schedule within this conditional policy, not realized revenue or alternative reserve policies.
@@ -119,7 +134,8 @@ With the policy disabled, the native warm-started LP is untouched.
 
 Each optimization uses current SOC and current forecasts, with no recovery history or persisted sale permission.
 The conditional sale markers exist only within that forecast solve and are discarded afterward.
-Reloading identical inputs does not change household-use permission.
+Protected-stock transitions use physical SOC boundaries within that solve, not a stored recovery episode.
+Reloading identical inputs does not grant new reserve permission or impose a refill target.
 
 ## Outputs, failures and control limits
 
