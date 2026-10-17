@@ -5,9 +5,11 @@ from collections.abc import Sequence
 import numpy as np
 import pytest
 
-from custom_components.haeo.core.adapters.registry import ELEMENT_TYPES
+from custom_components.haeo.core.adapters.elements.policy import extract_policy_rules
+from custom_components.haeo.core.adapters.policy_compilation import compile_policies
+from custom_components.haeo.core.adapters.registry import ELEMENT_TYPES, collect_model_elements
 from custom_components.haeo.core.adapters.reserve import ReservePlanner, ReservePolicy, ReserveResult
-from custom_components.haeo.core.model import OutputData
+from custom_components.haeo.core.model import Network, OutputData
 from custom_components.haeo.core.schema import as_connection_target
 from custom_components.haeo.core.schema.elements import ElementConfigData, ElementType
 
@@ -16,7 +18,7 @@ def reserve_participants(
     *,
     soc: float = 0.30,
     prices: Sequence[float] = (21, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15),
-    imports: Sequence[float] = (4, 4, 4, 4, 4, 0.09, 0.09),
+    imports: Sequence[float] = (22, 4, 4, 4, 4, 0.09, 0.09),
     solar: Sequence[float] = (0, 0, 0, 0, 0, 0, 0),
     capacity: float = 40.3,
     battery_efficiency: float = 0.95,
@@ -176,17 +178,18 @@ def test_asymmetric_periods_protect_the_physical_prefix_before_refill() -> None:
 
 
 def test_solar_saturation_does_not_warrant_battery_export() -> None:
-    """Battery export must add value rather than merely displace inverter-limited solar."""
+    """Inverter-limited solar exports must not require net battery depletion."""
     participants = reserve_participants(soc=0.30, solar=[14] * 7)
     result = ReservePlanner(participants, np.ones(7), ReservePolicy()).solve()
     outputs = reserve_outputs(result, participants)
     assert outputs["Market"]["grid_power_export"].values[0] == pytest.approx(9.399, abs=1e-4)
-    assert outputs["Storage"]["battery_power_discharge"].values[0] < 1e-5
+    soc = outputs["Storage"]["battery_state_of_charge"].values
+    assert soc[1] >= soc[0] - 1e-5
 
 
 def test_ordinary_sale_cannot_manufacture_reserve_use_for_a_later_spike() -> None:
     """The normal budget must cover local use and the valuable forecast first."""
-    participants = reserve_participants(soc=0.80, prices=[2, 8] + [0.15] * 5)
+    participants = reserve_participants(soc=0.80, prices=[2, 8] + [0.15] * 5, imports=[4, 9, 4, 4, 4, 0.09, 0.09])
     result = ReservePlanner(participants, np.ones(7), ReservePolicy()).solve()
     outputs = reserve_outputs(result, participants)
     local_use = 5 * (0.6 / 0.9025 + 0.165 / 0.95)
@@ -285,3 +288,26 @@ def test_solar_export_below_preferred_level_does_not_require_refill_or_extra_bat
     assert outputs["Market"]["grid_power_export"].values[0] == pytest.approx(expected_solar_export, abs=1e-4)
     assert outputs["Storage"]["battery_power_discharge"].values[0] < 1e-5
     assert outputs["Storage"]["battery_power_charge"].values[0] < 1e-5
+
+
+def test_reserve_preserves_native_flow_economics_without_ordinary_sales() -> None:
+    """Surplus solar retains native economics and bounds without extra direction restrictions."""
+    participants = reserve_participants(soc=1.0, prices=[0], imports=[0.30], solar=[14])
+    periods = np.ones(1)
+    rules = [
+        rule
+        for config in participants.values()
+        if config["element_type"] == ElementType.POLICY
+        for rule in extract_policy_rules(config)
+    ]
+    compiled = compile_policies(collect_model_elements(participants), rules)
+    native = Network(name="Native flow economics", periods=periods)
+    for config in compiled["elements"]:
+        native.add(config)
+    native_cost = native.optimize()
+    result = ReservePlanner(participants, periods, ReservePolicy()).solve()
+    outputs = reserve_outputs(result, participants)
+    assert result.cost == pytest.approx(native_cost, abs=0.001)
+    assert outputs["Market"]["grid_power_export"].values[0] < 1e-5
+    assert outputs["Market"]["grid_power_import"].values[0] < 1e-5
+    assert outputs["Storage"]["battery_state_of_charge"].values == pytest.approx([1.0, 1.0], abs=1e-5)

@@ -129,7 +129,7 @@ def set_reserve_inputs(hass: HomeAssistant, *, soc: float = 30, export: float = 
     """Supply observed state and native HAEO-format forecast tariffs."""
     start = dt_util.utcnow().replace(second=0, microsecond=0)
     for entity_id, values in (
-        ("sensor.import_tariff", [4] * 5 + [0.09] * 3),
+        ("sensor.import_tariff", [max(4, export + 1)] + [4] * 4 + [0.09] * 3),
         ("sensor.export_tariff", [export] + [0.15] * 7),
     ):
         hass.states.async_set(

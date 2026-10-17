@@ -14,7 +14,7 @@ from custom_components.haeo.core.adapters.policy_compilation import compile_poli
 from custom_components.haeo.core.adapters.registry import collect_model_elements
 from custom_components.haeo.core.const import DEFAULT_RESERVE_EXPORT_PRICE
 from custom_components.haeo.core.model.elements.battery import Battery
-from custom_components.haeo.core.model.elements.connection import Connection, ConnectionOutputName
+from custom_components.haeo.core.model.elements.connection import Connection
 from custom_components.haeo.core.model.network import Network
 from custom_components.haeo.core.model.util import broadcast_to_sequence
 from custom_components.haeo.core.schema import extract_connection_target
@@ -53,7 +53,6 @@ class _Model:
     network: Network
     solver: Highs
     battery: Battery
-    connections: dict[str, Connection[ConnectionOutputName]]
     exports: HighspyArray
     battery_exports: HighspyArray
 
@@ -145,14 +144,14 @@ class ReservePlanner:
             msg = "Observed battery SOC is outside the configured hard floor and ceiling"
             raise ReservePlanningError(msg)
         self.qualifying = self._series(self.grid_config["pricing"]["price_target_source"]) >= policy.export_price
-        self.pairs = (
+        pairs = (
             (f"{self.battery_name}:discharge", f"{self.battery_name}:charge", self.battery_config),
             (f"{self.inverter_name}:dc_to_ac", f"{self.inverter_name}:ac_to_dc", self.inverter_config),
             (f"{self.grid_name}:import", f"{self.grid_name}:export", self.grid_config),
         )
         self.limits = {
             name: self._limit(config, key)
-            for forward, reverse, config in self.pairs
+            for forward, reverse, config in pairs
             for name, key in ((forward, "max_power_source_target"), (reverse, "max_power_target_source"))
         }
         inverter_efficiency = self._series(self.inverter_config["efficiency"].get("efficiency_source_target", 1.0))
@@ -221,7 +220,7 @@ class ReservePlanner:
         solver = network._solver  # noqa: SLF001 (reserve planning owns this isolated model's solve lifecycle)
         for element in network.elements.values():
             element.constraints()
-        return _Model(network, solver, battery, connections, exports.total_power_in, battery_exports)
+        return _Model(network, solver, battery, exports.total_power_in, battery_exports)
 
     @staticmethod
     def _primary(model: _Model) -> highs_linear_expression:
@@ -263,18 +262,6 @@ class ReservePlanner:
                     + (self.limits[f"{self.grid_name}:export"][t] - self.solar_only[t]) * ordinary_sold[t],
                 )
             h.addConstr(energy[t + 1] >= self.reserve * ordinary_sold[t])
-            for forward, reverse, _config in self.pairs:
-                direction = h.addVariable(lb=0, ub=1, type=HighsVarType.kInteger)
-                # Release limits apply at the power-limit segment, after losses,
-                # not necessarily at the connection's reported input power.
-                h.addConstr(
-                    model.connections[forward].segments["power_limit"].total_power_in[t]
-                    <= self.limits[forward][t] * direction
-                )
-                h.addConstr(
-                    model.connections[reverse].segments["power_limit"].total_power_in[t]
-                    <= self.limits[reverse][t] * (1 - direction)
-                )
         h.setOptionValue("solver", "choose")
         h.setOptionValue("mip_rel_gap", 0.0)
         h.setOptionValue("mip_abs_gap", OBJECTIVE_TOLERANCE)

@@ -100,8 +100,10 @@ Charging has no reserve-specific price, debt, target or deadline.
 It can change economically to support a profitable trade, but removing the trade also removes its conditional preferred-floor obligation.
 All quantities, household supply and charging remain joint decisions; qualifying exports are not frozen by a preliminary solve.
 
-Physical battery, inverter and grid opposing directions are exclusive in reserve mode.
-The conditional sale guard and opposing directions use binary variables, so the solve is a mixed-integer program, **not a pure LP**.
+Directional flows retain the native continuous model, including its configured losses, power limits and source-provenance constraints.
+As in native HAEO, both directions may be positive within a forecast period; reserve mode adds no direction-exclusivity switches.
+Only the conditional sale guard uses binary variables: one per forecast period, rather than four.
+The solve remains a mixed-integer program, **not a pure LP**.
 There is no separate reserve-inventory model, qualifying-release marker, certificate or reference solve.
 
 The solve accepts a \$0.001 absolute economic-objective gap with no relative gap.
