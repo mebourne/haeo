@@ -324,6 +324,7 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._pending_refresh: bool = False
         self._optimization_in_progress: bool = False  # Prevent concurrent optimizations
         self._pending_element_updates: dict[str, ElementConfigData] = {}
+        self._unloaded = False
 
         # No update_interval - we're event-driven from input entities
         # No request_refresh_debouncer - we handle debouncing ourselves
@@ -513,7 +514,7 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
         Handles debouncing to prevent excessive refreshes.
         """
         # Skip if auto-optimization is disabled
-        if not self.auto_optimize_enabled:
+        if self._unloaded or not self.auto_optimize_enabled:
             return
 
         # If optimization is in progress, just mark pending
@@ -655,6 +656,7 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     def cleanup(self) -> None:
         """Clean up coordinator resources when unloading."""
+        self._unloaded = True
         for unsub in self._state_change_unsubs:
             unsub()
         self._state_change_unsubs.clear()
@@ -700,6 +702,7 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # Set flag to prevent concurrent optimization triggers from callbacks
         # This is cleared in the finally block
         self._optimization_in_progress = True
+        self._pending_refresh = False
 
         try:
             # Mark optimization start time immediately to prevent concurrent triggers
@@ -841,6 +844,9 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
             completed_at = dt_util.utc_from_timestamp(end_time).astimezone()
 
+            if self._unloaded:
+                msg = "Integration unloaded during optimization"
+                raise UpdateFailed(msg)
             return CoordinatorData(
                 context=context,
                 outputs=outputs,
@@ -850,8 +856,13 @@ class HaeoDataUpdateCoordinator(DataUpdateCoordinator[CoordinatorData]):
         finally:
             # Always clear the in-progress flag
             self._optimization_in_progress = False
-            # Clear pending flag - the next state change will trigger a new optimization
+            pending_refresh = self._pending_refresh
             self._pending_refresh = False
+            # Publish this solve's snapshot before replanning changes received
+            # during the solve; input changes are not optimization failures.
+            if pending_refresh and not self._unloaded:
+                self._last_optimization_time = time.time()
+                self.signal_optimization_stale()
 
 
 __all__ = [

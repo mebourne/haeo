@@ -30,6 +30,11 @@ When sensor data changes between boundaries, the corresponding input entity upda
 To avoid running multiple optimizations in quick succession, HAEO uses internal debouncing.
 Related updates that arrive close together are grouped, and optimization runs after activity settles.
 
+Each solve uses the inputs, SOC, tariffs and horizon captured at its start.
+Previously published values and `forecast` attributes stay available while it runs.
+New input events do not invalidate that solve: its completed result replaces the published outputs, then one follow-up solve processes the latest pending inputs after the configured debounce.
+Real optimization failures still make affected outputs unavailable.
+
 ## Manual refresh options
 
 Sometimes you want the latest recommendation right away.
